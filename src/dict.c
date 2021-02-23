@@ -494,7 +494,7 @@ int dictAdd(dict *d, void *key, void *val)
     // 键已存在，添加失败
     if (!entry) return DICT_ERR;
 
-    // 键不存在，设置节点的值
+    // 键不存在，设置 entry 节点的值
     // T = O(1)
     dictSetVal(d, entry, val);
 

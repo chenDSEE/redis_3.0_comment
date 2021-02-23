@@ -929,7 +929,7 @@ int getLongLongFromObject(robj *o, long long *target) {
 
 /*
  * 尝试从对象 o 中取出整数值，
- * 或者尝试将对象 o 中的值转换为整数值，
+ * 或者尝试将对象 o 中的值转换为整数值（long long），
  * 并将这个得出的整数值保存到 *target 。
  *
  * 如果取出/转换成功的话，返回 REDIS_OK 。
@@ -939,7 +939,7 @@ int getLongLongFromObject(robj *o, long long *target) {
  */
 int getLongLongFromObjectOrReply(redisClient *c, robj *o, long long *target, const char *msg) {
 
-    long long value;
+    long long value; // local 变量作为临时变量，能够更好的保护 target，确保在进一步操作失败时，不会将失败的结果带出去
 
     // T = O(N)
     if (getLongLongFromObject(o, &value) != REDIS_OK) {

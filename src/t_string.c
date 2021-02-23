@@ -86,14 +86,20 @@ static int checkStringLength(redisClient *c, long long size) {
 #define REDIS_SET_NX (1<<0)     /* Set if key not exists. */
 #define REDIS_SET_XX (1<<1)     /* Set if key exists. */
 
-void setGenericCommand(redisClient *c, int flags, robj *key, robj *val, robj *expire, int unit, robj *ok_reply, robj *abort_reply) {
-
+void setGenericCommand(redisClient *c, 
+                       int flags, // XX or NX,
+                       robj *key, robj *val, 
+                       robj *expire, int unit,  // expire 指定过期时间，而后面的 int unit 这是进一步指定 expire 的时间格式
+                       robj *ok_reply, robj *abort_reply)   // 这两个参数是作为返回值来用了
+{
+    // long long, 8 Byte, 是 int 的两倍，相当于 int64_t, 是有符号位的
     long long milliseconds = 0; /* initialized to avoid any harmness warning */
 
     // 取出过期时间
     if (expire) {
 
-        // 取出 expire 参数的值
+        // 取出 expire 参数的值，因为 expire 本身所储存的值是经过高度序列化的
+        // 所以要进一步还原为正常的过期时间，最后结果将会放在 milliseconds 里面
         // T = O(N)
         if (getLongLongFromObjectOrReply(c, expire, &milliseconds, NULL) != REDIS_OK)
             return;
@@ -111,19 +117,19 @@ void setGenericCommand(redisClient *c, int flags, robj *key, robj *val, robj *ex
     }
 
     // 如果设置了 NX 或者 XX 参数，那么检查条件是否不符合这两个设置
-    // 在条件不符合时报错，报错的内容由 abort_reply 参数决定
-    if ((flags & REDIS_SET_NX && lookupKeyWrite(c->db,key) != NULL) ||
-        (flags & REDIS_SET_XX && lookupKeyWrite(c->db,key) == NULL))
+    // 在条件不符合时报错，报错的内容由 abort_reply 参数决定 TODO: 没看懂
+    if ((flags & REDIS_SET_NX && lookupKeyWrite(c->db,key) != NULL) // 首先看看 flags 里面 NX 有没被 set
+        || (flags & REDIS_SET_XX && lookupKeyWrite(c->db,key) == NULL))
     {
         addReply(c, abort_reply ? abort_reply : shared.nullbulk);
         return;
     }
 
-    // 将键值关联到数据库
-    setKey(c->db,key,val);
+    // 将键值关联到数据库, 真正的数据库存储操作
+    setKey(c->db,key,val);  // set a key, whatever it was existing or not, to a new object.
 
     // 将数据库设为脏
-    server.dirty++;
+    server.dirty++; // TODO: 为哪里服务？
 
     // 为键设置过期时间
     if (expire) setExpire(c->db,key,mstime()+milliseconds);
@@ -150,7 +156,7 @@ void setCommand(redisClient *c) {
     // 设置选项参数
     for (j = 3; j < c->argc; j++) {
         char *a = c->argv[j]->ptr;
-        robj *next = (j == c->argc-1) ? NULL : c->argv[j+1];
+        robj *next = (j == c->argc-1) ? NULL : c->argv[j+1];    // 取下一个参数
 
         if ((a[0] == 'n' || a[0] == 'N') &&
             (a[1] == 'x' || a[1] == 'X') && a[2] == '\0') {
