@@ -1479,6 +1479,9 @@ sds sdsjoin(char **argv, int argc, char *sep) {
 // usage: 
 // 1) gcc -g zmalloc.c testhelp.h sds.c -D SDS_TEST_MAIN
 // 2) ./a.out
+//
+// PS: gcc -g zmalloc.c testhelp.h sds.c -D SDS_TEST_MAIN -fsanitize=address -fno-omit-frame-pointer -O1 
+// you can use this commond to detecte memory problem. If commond failed, place update your gcc.
 #ifdef SDS_TEST_MAIN
 #include <stdio.h>
 #include "testhelp.h"
@@ -1620,7 +1623,6 @@ int main(void) {
         test_cond("sdscatrepr(...data...)",
             memcmp(y,"\"\\a\\n\\x00foo\\r\"\0",16) == 0)  // 为什么后面没有 '\0'
         // y 就是字符串 "\a\n\x00foo\r" 15 个字符
-
         {
             int oldfree;
 
@@ -1637,7 +1639,11 @@ int main(void) {
             test_cond("sdsIncrLen() -- content", x[0] == '0' && x[1] == '1');
             test_cond("sdsIncrLen() -- len", sh->len == 2);
             test_cond("sdsIncrLen() -- free", sh->free == oldfree-1);
+
         }
+
+        sdsfree(x);
+        sdsfree(y);
     }
     test_report()
     return 0;
