@@ -6,11 +6,24 @@ use 'make install' to make up ELF
 
 
 
+------   HOW to run unit test  -----
+1. redis unit test is done with tcl script, all the test scripts is in tests/* ;
+2. cmd to run unit test:
+   1) ./runtest --help
+   2) ./runtest --list-tests
+   3) ./runtest <unit test name in 2) commond>
 
+3. ./runtest will do all the unit tests! It takes quite a long time;
 
-
-
-
+PS:
+The unit test about sds is implated in src/testhelp.h;
+You only need to take the follow step to finish unit test for sds:
+   1) cd src
+   2) gcc -g zmalloc.c testhelp.h sds.c -D SDS_TEST_MAIN
+      
+      Or use this to detecte memory problem: 
+      gcc -g zmalloc.c testhelp.h sds.c -D SDS_TEST_MAIN -fsanitize=address -fno-omit-frame-pointer -O1
+   3) ./a.out
 
 
 
