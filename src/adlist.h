@@ -35,6 +35,7 @@
 
 /*
  * 双端链表节点
+ * 每一次新建的时候，都要手动初始化 node 中的每一个值，确保安全，因为 node 中的每一个 field 都会用到的
  */
 typedef struct listNode {
 
@@ -45,33 +46,40 @@ typedef struct listNode {
     struct listNode *next;
 
     // 节点的值
-    void *value;
+    void *value;    // 真实 value 部分
 
 } listNode;
 
 /*
  * 双端链表迭代器
+ * 要考虑如何规避迭代器失效的问题
+ * 调用者在使用的时候要留意：别忘了释放 iter，否则可能造成内存泄漏
  */
 typedef struct listIter {
 
     // 当前迭代到的节点
+    // 之所以要叫 next，其实也是遵循迭代器的通常规则罢了
+    // listNext(iter) 返回的是 iter 当前指向的节点，同时让 iter->next 指向下一次会读的 node
+    // 提前指向下一节点，基本是约定俗成的行为
+    // 更重要的是：要是删除了迭代器当前指向的节点，这时候整个迭代器就废掉了！！！
+    // 会面临不得不重新迭代的困境
     listNode *next;
 
     // 迭代的方向
-    int direction;
+    int direction;  // AL_START_HEAD ：从表头向表尾迭代； AL_START_TAIL ：从表尾向表头迭代
 
 } listIter;
 
 /*
  * 双端链表结构
  */
-typedef struct list {
+typedef struct list {   // 链表头
 
     // 表头节点
-    listNode *head;
+    listNode *head; // 指向真实的 node 就好，不需要维护一个独立的 head node
 
     // 表尾节点
-    listNode *tail;
+    listNode *tail; // 指向真实的 node 就好，不需要维护一个独立的 head node
 
     // 节点值复制函数
     void *(*dup)(void *ptr);
@@ -83,20 +91,14 @@ typedef struct list {
     int (*match)(void *ptr, void *key);
 
     // 链表所包含的节点数量
-    unsigned long len;
+    unsigned long len;  // 8 Byte（Linux 下, uint64_t），0 ~ 18,446,744,073,709,551,615
 
 } list;
 
 /* Functions implemented as macros */
-// 返回给定链表所包含的节点数量
-// T = O(1)
-#define listLength(l) ((l)->len)
-// 返回给定链表的表头节点
-// T = O(1)
-#define listFirst(l) ((l)->head)
-// 返回给定链表的表尾节点
-// T = O(1)
-#define listLast(l) ((l)->tail)
+/**
+ *  针对各个链表节点 struct listNode 的操作 
+*/
 // 返回给定节点的前置节点
 // T = O(1)
 #define listPrevNode(n) ((n)->prev)
@@ -106,6 +108,19 @@ typedef struct list {
 // 返回给定节点的值
 // T = O(1)
 #define listNodeValue(n) ((n)->value)
+
+/**
+ *  针对链表头 struct list 的操作 
+*/
+// 返回给定链表所包含的节点数量
+// T = O(1)
+#define listLength(l) ((l)->len)
+// 返回给定链表的表头节点
+// T = O(1)
+#define listFirst(l) ((l)->head)
+// 返回给定链表的表尾节点
+// T = O(1)
+#define listLast(l) ((l)->tail)
 
 // 将链表 l 的值复制函数设置为 m
 // T = O(1)
@@ -127,7 +142,7 @@ typedef struct list {
 // T = O(1)
 #define listGetMatchMethod(l) ((l)->match)
 
-/* Prototypes */
+/* Prototypes（函数原型） */
 list *listCreate(void);
 void listRelease(list *list);
 list *listAddNodeHead(list *list, void *value);
@@ -140,8 +155,8 @@ void listReleaseIterator(listIter *iter);
 list *listDup(list *orig);
 listNode *listSearchKey(list *list, void *key);
 listNode *listIndex(list *list, long index);
-void listRewind(list *list, listIter *li);
-void listRewindTail(list *list, listIter *li);
+void listRewind(list *list, listIter *li);      // reset iter to head
+void listRewindTail(list *list, listIter *li);  // reset iter to tail
 void listRotate(list *list);
 
 /* Directions for iterators 

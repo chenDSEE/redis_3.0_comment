@@ -35,7 +35,7 @@
 
 /* Create a new list. The created list can be freed with
  * AlFreeList(), but private value of every node need to be freed
- * by the user before to call AlFreeList().
+ * by the user before to call AlFreeList(). AlFreeList() 看起来已经没有在用了
  *
  * On error, NULL is returned. Otherwise the pointer to the new list. */
 /*
@@ -50,7 +50,7 @@ list *listCreate(void)
     struct list *list;
 
     // 分配内存
-    if ((list = zmalloc(sizeof(*list))) == NULL)
+    if ((list = zmalloc(sizeof(*list))) == NULL)    // sizeof(list) = 4 Byte; sizeof(struct list) = sizeof(*list)
         return NULL;
 
     // 初始化属性
@@ -80,16 +80,18 @@ void listRelease(list *list)
     current = list->head;
     // 遍历整个链表
     len = list->len;
-    while(len--) {
+    while(len--) {  // 通过 len 的记录，确保了 current != NULL
         next = current->next;
 
         // 如果有设置值释放函数，那么调用它
+        // 相当于每一个节点 value 部分的析构函数，因为当 value 部分存在指针的话，
+        // 不采用指定的析构函数释放 value 中指针指向的内存，将会发生内存泄漏
         if (list->free) list->free(current->value);
 
         // 释放节点结构
         zfree(current);
 
-        current = next;
+        current = next; // update current 节点
     }
 
     // 释放链表结构
@@ -111,16 +113,18 @@ void listRelease(list *list)
  *
  * T = O(1)
  */
+// 头插法：先建立 new_node 跟 head 的关连，然后移动 head
+// void *value 不能够存在于 stack 上，因为不会拷贝 value 指向的内存值，否则将会访问已经释放掉的内存
 list *listAddNodeHead(list *list, void *value)
 {
     listNode *node;
 
     // 为节点分配内存
     if ((node = zmalloc(sizeof(*node))) == NULL)
-        return NULL;
+        return NULL;    // 内存分配失败，不改动整个 list，确保异常安全
 
     // 保存值指针
-    node->value = value;
+    node->value = value;    // 新节点构造完成，这也就要求 value 的值不能在 stack 
 
     // 添加节点到空链表
     if (list->len == 0) {
@@ -155,13 +159,13 @@ list *listAddNodeHead(list *list, void *value)
  *
  * T = O(1)
  */
-list *listAddNodeTail(list *list, void *value)
+list *listAddNodeTail(list *list, void *value)  // 仅仅操作节点的浅拷贝
 {
     listNode *node;
 
     // 为新节点分配内存
     if ((node = zmalloc(sizeof(*node))) == NULL)
-        return NULL;
+        return NULL;    // 内存分配失败，不改动整个 list，确保异常安全
 
     // 保存值指针
     node->value = value;
@@ -190,8 +194,9 @@ list *listAddNodeTail(list *list, void *value)
  * 如果 after 为 0 ，将新节点插入到 old_node 之前。
  * 如果 after 为 1 ，将新节点插入到 old_node 之后。
  *
- * T = O(1)
+ * T = O(1)，在指定节点前、后创建并插入一个节点
  */
+// TODO: 要是 old_node 是 head、tail 这不就坑了嘛？有特别更新的！
 list *listInsertNode(list *list, listNode *old_node, void *value, int after) {
     listNode *node;
 
@@ -202,30 +207,33 @@ list *listInsertNode(list *list, listNode *old_node, void *value, int after) {
     // 保存值
     node->value = value;
 
+    /* 更新新建节点，自己的信息 */
     // 将新节点添加到给定节点之后
     if (after) {
         node->prev = old_node;
         node->next = old_node->next;
-        // 给定节点是原表尾节点
-        if (list->tail == old_node) {
+        
+        if (list->tail == old_node) {   // 给定节点是原表尾节点
             list->tail = node;
         }
     // 将新节点添加到给定节点之前
     } else {
         node->next = old_node;
         node->prev = old_node->prev;
-        // 给定节点是原表头节点
-        if (list->head == old_node) {
+        
+        if (list->head == old_node) {   // 给定节点是原表头节点
             list->head = node;
         }
     }
 
+    /* 更新新建节点，左右两个节点的信息 */
+    // 之所以要这样独立了出来，是为了简化上面的 if-else 的嵌套跟逻辑，但总流程没有什么变化
     // 更新新节点的前置指针
-    if (node->prev != NULL) {
+    if (node->prev != NULL) {  // 要是新节点有左边的邻居的话，则更新这个邻居的 next 为自己
         node->prev->next = node;
     }
     // 更新新节点的后置指针
-    if (node->next != NULL) {
+    if (node->next != NULL) {   // 要是新节点有右边邻居的话，则更新这个邻居的 prev 为自己
         node->next->prev = node;
     }
 
@@ -242,23 +250,23 @@ list *listInsertNode(list *list, listNode *old_node, void *value, int after) {
 /*
  * 从链表 list 中删除给定节点 node 
  * 
- * 对节点私有值(private value of the node)的释放工作由调用者进行。
+ * 对节点私有值(private value of the node)的释放工作由调用者进行。（list->free(node->value)）
  *
  * T = O(1)
  */
 void listDelNode(list *list, listNode *node)
 {
-    // 调整前置节点的指针
+    // 调整 node prev节点的指针
     if (node->prev)
-        node->prev->next = node->next;
+        node->prev->next = node->next;  // 当 node 是 tail 时，这里会把新 tail->next 设置为 NULL
     else
-        list->head = node->next;
+        list->head = node->next;    // node 是 head
 
-    // 调整后置节点的指针
+    // 调整 node next 节点的指针
     if (node->next)
-        node->next->prev = node->prev;
+        node->next->prev = node->prev;   // 当 node 是 head 时，这里会把新 head->prev 设置为 NULL
     else
-        list->tail = node->prev;
+        list->tail = node->prev;    // node 是 tail
 
     // 释放值
     if (list->free) list->free(node->value);
@@ -319,6 +327,7 @@ void listReleaseIterator(listIter *iter) {
  *
  * T = O(1)
  */
+// reset iter to head
 void listRewind(list *list, listIter *li) {
     li->next = list->head;
     li->direction = AL_START_HEAD;
@@ -330,17 +339,20 @@ void listRewind(list *list, listIter *li) {
  *
  * T = O(1)
  */
+// reset iter to tail
 void listRewindTail(list *list, listIter *li) {
     li->next = list->tail;
     li->direction = AL_START_TAIL;
 }
 
-/* Return the next element of an iterator.
+/* Return the next element of an iterator.(return 的是 next 这个成员，所以实际上时返回 iter 当前指向的 node)
+ *
+ * 迭代器失效问题：发生删除操作时，仅仅当前迭代器失效
  * It's valid to remove the currently returned element using
- * listDelNode(), but not to remove other elements.
+ * listDelNode(), but not to remove other elements.（这一点能够避免迭代器指向的内存失效）
  *
  * The function returns a pointer to the next element of the list,
- * or NULL if there are no more elements, so the classical usage patter
+ * or NULL if there are no more elements, so the classical usage pattern
  * is:
  *
  * iter = listGetIterator(list,<direction>);
@@ -370,7 +382,7 @@ listNode *listNext(listIter *iter)
     if (current != NULL) {
         // 根据方向选择下一个节点
         if (iter->direction == AL_START_HEAD)
-            // 保存下一个节点，防止当前节点被删除而造成指针丢失
+            // 保存下一个节点，防止当前节点被删除而造成指针丢失（迭代器失效）
             iter->next = current->next;
         else
             // 保存下一个节点，防止当前节点被删除而造成指针丢失
@@ -401,7 +413,8 @@ listNode *listNext(listIter *iter)
  *
  * T = O(N)
  */
-list *listDup(list *orig)
+// 由于 redis 主线程是单线程的缘故，执行 dup 操作的时候，orig list 是不会发生变动的
+list *listDup(list *orig)   // const list* orig
 {
     list *copy;
     listIter *iter;
@@ -423,6 +436,7 @@ list *listDup(list *orig)
 
         // 复制节点值到新节点
         if (copy->dup) {
+            // 完成深拷贝
             value = copy->dup(node->value);
             if (value == NULL) {
                 listRelease(copy);
@@ -432,7 +446,7 @@ list *listDup(list *orig)
         } else
             value = node->value;
 
-        // 将节点添加到链表
+        // 将节点添加到链表（创建 node 会在里面完成）
         if (listAddNodeTail(copy, value) == NULL) {
             listRelease(copy);
             listReleaseIterator(iter);
@@ -468,6 +482,8 @@ list *listDup(list *orig)
  *
  * T = O(N)
  */
+// void *key 就是 node->value, 要是有自己的 match_method 的话，将会将 key 传递进去，key 指针交由调用者来解析
+// 这就相当于自行重载 operator==
 listNode *listSearchKey(list *list, void *key)
 {
     listIter *iter;
@@ -485,7 +501,7 @@ listNode *listSearchKey(list *list, void *key)
                 return node;
             }
         } else {
-            if (key == node->value) {
+            if (key == node->value) {   // default 将会是直接比较：是否指向同一块内存，而不比较内存里面的内容
                 listReleaseIterator(iter);
                 // 找到
                 return node;
@@ -510,7 +526,7 @@ listNode *listSearchKey(list *list, void *key)
  * 索引以 0 为起始，也可以是负数， -1 表示链表最后一个节点，诸如此类。
  *
  * 如果索引超出范围（out of range），返回 NULL 。
- *
+ * 根据 index 取出，实际上也是只能够遍历的
  * T = O(N)
  */
 listNode *listIndex(list *list, long index) {
@@ -518,37 +534,42 @@ listNode *listIndex(list *list, long index) {
 
     // 如果索引为负数，从表尾开始查找
     if (index < 0) {
-        index = (-index)-1;
+        index = (-index)-1; // 既然 list 的 index 必然是用来遍历的，那我直接算出找到当前 index 需要操作多少次就好了
         n = list->tail;
-        while(index-- && n) n = n->prev;
+        while(index-- && n) n = n->prev;    // 不断检查 curr_node，避免 crash，n = n->prev 总共需要进行 index 次
     // 如果索引为正数，从表头开始查找
     } else {
         n = list->head;
         while(index-- && n) n = n->next;
     }
 
-    return n;
+    return n;   // 当上面的 while-loop 里面发生了提前结束的情况，n 将会是 NULL，而这时候，也就 return NULL 了
 }
 
 /* Rotate the list removing the tail node and inserting it to the head. */
 /*
- * 取出链表的表尾节点，并将它移动到表头，成为新的表头节点。
+ * 取出链表的表尾节点，并将它移动到表头，成为新的表头节点。（向后循环移动）
  *
  * T = O(1)
  */
 void listRotate(list *list) {
     listNode *tail = list->tail;
 
-    if (listLength(list) <= 1) return;
+    if (listLength(list) <= 1) return;  // 只有一个节点，不用操作了
 
     /* Detach current tail */
     // 取出表尾节点
-    list->tail = tail->prev;
-    list->tail->next = NULL;
+    // 这是一个很聪明的投机操作：利用 tail、head 来干活
+    // 因为 list->tail、list->head 在使用上 > 0 之后，就是必然会被填充的
+    // 所以是可以直接不判断 NULL 的。再加上所有 list 相关的底层操作都利用函数封装起来了
+    // 这样就进一步保证了：只要有 node 存在于这个 list，list->head  list->tail 就不会是 NULL
+    list->tail = tail->prev;    // update 新的 tail
+    // 十分取巧的操作：用 list->tail 找到 next 而不是 tail->prev->next
+    list->tail->next = NULL;    // list->tail == NULL 的情况已经被 if (listLength(list) <= 1) return; 预防了
 
     /* Move it as head */
     // 插入到表头
-    list->head->prev = tail;
+    list->head->prev = tail;    // 取巧的操作
     tail->prev = NULL;
     tail->next = list->head;
     list->head = tail;
