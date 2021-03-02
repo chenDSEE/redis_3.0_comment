@@ -301,6 +301,7 @@ int dictResize(dict *d)
  *
  * T = O(N)
  */
+// 本函数还能够触发 dict 的缩小操作
 int dictExpand(dict *d, unsigned long size)
 {
     // 新哈希表
@@ -313,6 +314,7 @@ int dictExpand(dict *d, unsigned long size)
 
     // 根据 size 参数，计算哈希表的大小
     // T = O(1)
+    // 有可能是缩小的，因为没有要求 size >= d->ht[0].size
     unsigned long realsize = _dictNextPower(size);  // 返回结果总是 DICT_HT_INITIAL_SIZE 的 N 次方（LONG_MAX 是特例），且返回值必然比 size 大
 
     /* the size is invalid if it is smaller than the number of

@@ -159,6 +159,7 @@ typedef struct dict {
     dictType *type;
 
     // 私有数据, 当前版本中没有用到，都是设置为 NULL
+    // 传递数据给上面的 dictType *type 里面的 callback
     void *privdata;
 
     // 哈希表
