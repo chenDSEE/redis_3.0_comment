@@ -60,6 +60,7 @@
 
 /*
  * 哈希表节点
+ * entry 的管理信息，实际数据部分通常采用指针（u64\s64 除外）
  */
 typedef struct dictEntry {
     
@@ -71,9 +72,9 @@ typedef struct dictEntry {
         void *val;
         uint64_t u64;
         int64_t s64;
-    } v;
+    } v;    // 实际上这里是 8 byte
 
-    // 指向下个哈希表节点，形成链表
+    // 指向下个哈希表节点，形成单向链表
     struct dictEntry *next;
 
 } dictEntry;
@@ -81,19 +82,20 @@ typedef struct dictEntry {
 
 /*
  * 字典类型特定函数
+ * TODO: 为什么要传递 privdata 进去，用来做什么？
  */
 typedef struct dictType {
 
     // 计算哈希值的函数
     unsigned int (*hashFunction)(const void *key);
 
-    // 复制键的函数
+    // 复制键的函数(以便提供深拷贝函数)
     void *(*keyDup)(void *privdata, const void *key);
 
-    // 复制值的函数
+    // 复制值的函数(以便提供深拷贝函数)
     void *(*valDup)(void *privdata, const void *obj);
 
-    // 对比键的函数
+    // 对比键的函数(重载 operator= 操作符)
     int (*keyCompare)(void *privdata, const void *key1, const void *key2);
 
     // 销毁键的函数
@@ -104,6 +106,20 @@ typedef struct dictType {
 
 } dictType;
 
+/**
+ * 
+ *                                          dictEntry array
+ *         +-->  ht[0] ----- table_1  --->  dictEntry_1(dictEntry*)   --->  dictEntry_1(dictEntry node, will make a single link-list)
+ *         |   (dictht)   (dictEntry**)     dictEntry_2(dictEntry*)   --->  dictEntry_2(dictEntry node, will make a single link-list)
+ *         |                                dictEntry_3(dictEntry*)   --->  dictEntry_3(dictEntry node, will make a single link-list)
+ *  dict --+                                ....                      --->  ...
+ *         |         
+ *         |
+ *         +-->  ht[1] ----- table_2  --->  dictEntry_1(dictEntry*)   --->  dictEntry_1(dictEntry node, will make a single link-list)
+ *             (dictht)   (dictEntry**)     dictEntry_2(dictEntry*)   --->  dictEntry_2(dictEntry node, will make a single link-list)
+ *                                          dictEntry_3(dictEntry*)   --->  dictEntry_3(dictEntry node, will make a single link-list)
+ *                                          ....                      --->  ...
+*/
 
 /* This is our hash table structure. Every dictionary has two of this as we
  * implement incremental rehashing, for the old to the new table. */
@@ -111,8 +127,12 @@ typedef struct dictType {
  * 哈希表
  *
  * 每个字典都使用两个哈希表，从而实现渐进式 rehash 。
+ * 由于渐进式 rehash 的关系，确实是有可能同时再使用两个 hash-table 的
+ * 同时也会采用 timer 来定时 rehash，而不是彻底靠 惰性 rehash
+ * rehash 的标志放在 dict，因为管理 hash table 的是 dict，单个 hash table 知道自己正在 rehash 又怎样？
+ * 两个 hash table 之间并不能相互访问，所以把 rehash 的标志放在更上层的 dict 是合理的
  */
-typedef struct dictht {
+typedef struct dictht { // dict hash table
     
     // 哈希表数组
     dictEntry **table;
@@ -122,6 +142,7 @@ typedef struct dictht {
     
     // 哈希表大小掩码，用于计算索引值
     // 总是等于 size - 1
+    // 为了加速 hash code --> hash table array index(下标) 的映射计算速度
     unsigned long sizemask;
 
     // 该哈希表已有节点的数量
@@ -137,14 +158,22 @@ typedef struct dict {
     // 类型特定函数
     dictType *type;
 
-    // 私有数据
+    // 私有数据, 当前版本中没有用到，都是设置为 NULL
     void *privdata;
 
     // 哈希表
-    dictht ht[2];
+    // 并不是指针，而是老老实实的在自己这里记住一个 dictht 里面包含了那些指针，自己做一个完整且独立的数据备份
+    // 比起整个 dict，这点管理内存容量实在是小（里面全是指针），单独做一个备份也没关系，而且更换 hash table 本身就已经
+    // 是很耗时间的时候，这一点指针的拷贝并不是瓶颈
+    // ht[0] 总是主要使用的 hash table
+    // ht[1] 总是作为备用的、rehash 时采用的 hash table
+    // 在 rehash 完成的时候，ht[1] 会更新成为 ht[0]
+    dictht ht[2];   // 为了渐进式 rehash 准备
 
-    // rehash 索引
+    // rehash 索引，rehashidx 前面的 hash table entry 都已经从 ht[0] 搬运到了 ht[1] 了
+    // 在 rehash 的途中，rehashidx 将会不断增加
     // 当 rehash 不在进行时，值为 -1
+    // 先 resize 备用的 ht，然后才会有 rehash
     int rehashidx; /* rehashing not in progress if rehashidx == -1 */
 
     // 目前正在运行的安全迭代器的数量
@@ -154,7 +183,9 @@ typedef struct dict {
 
 /* If safe is set to 1 this is a safe iterator, that means, you can call
  * dictAdd, dictFind, and other functions against the dictionary even while
- * iterating. Otherwise it is a non safe iterator, and only dictNext()
+ * iterating. 
+ * 
+ * Otherwise it is a non safe iterator, and only dictNext()
  * should be called while iterating. */
 /*
  * 字典迭代器
@@ -162,9 +193,12 @@ typedef struct dict {
  * 如果 safe 属性的值为 1 ，那么在迭代进行的过程中，
  * 程序仍然可以执行 dictAdd 、 dictFind 和其他函数，对字典进行修改。
  *
- * 如果 safe 不为 1 ，那么程序只会调用 dictNext 对字典进行迭代，
+ * 如果 safe 不为 1 ，那么程序只能调用 dictNext 对字典进行迭代，
  * 而不对字典进行修改。
  */
+/**
+ * TODO: 安全迭代器 VS 非安全迭代器
+*/
 typedef struct dictIterator {
         
     // 被迭代的字典
@@ -180,8 +214,13 @@ typedef struct dictIterator {
     //             因为在安全迭代器运作时， entry 所指向的节点可能会被修改，
     //             所以需要一个额外的指针来保存下一节点的位置，
     //             从而防止指针丢失
+    // 关联式容器是有可能做到只有当前迭代器失效的
     dictEntry *entry, *nextEntry;
 
+    // TODO: fingerprint 是用来？
+    // unsafe iterator fingerprint for misuse detection
+    // misuse detection：根据当前 dict 的 used + size 来生成某个时间点上，独一无二的 version
+    // 对于 dict 来说，value 的改变并不影响 version，而是改变了内部内存块的操作才会改变 version
     long long fingerprint; /* unsafe iterator fingerprint for misuse detection */
 } dictIterator;
 
@@ -194,12 +233,16 @@ typedef void (dictScanFunction)(void *privdata, const dictEntry *de);
 #define DICT_HT_INITIAL_SIZE     4
 
 /* ------------------------------- Macros ------------------------------------*/
+// 给每一个变量都加上括号，确保变量能够在展开之后，依然是同一个变量
+// NOTE: '\' 后面不能有任何的空格！！！
+
 // 释放给定字典节点的值
+// TODO: 要是没有对应的析构函数怎么办？为什么这里不加上 do {...} while(0) ?
 #define dictFreeVal(d, entry) \
     if ((d)->type->valDestructor) \
         (d)->type->valDestructor((d)->privdata, (entry)->v.val)
 
-// 设置给定字典节点的值
+// 设置给定字典节点的值，浅拷贝\深拷贝
 #define dictSetVal(d, entry, _val_) do { \
     if ((d)->type->valDup) \
         entry->v.val = (d)->type->valDup((d)->privdata, _val_); \
@@ -216,11 +259,12 @@ typedef void (dictScanFunction)(void *privdata, const dictEntry *de);
     do { entry->v.u64 = _val_; } while(0)
 
 // 释放给定字典节点的键
+// TODO: 要是没有对应的析构函数怎么办？为什么这里不加上 do {...} while(0) ?
 #define dictFreeKey(d, entry) \
     if ((d)->type->keyDestructor) \
         (d)->type->keyDestructor((d)->privdata, (entry)->key)
 
-// 设置给定字典节点的键
+// 设置给定字典节点的键, 浅拷贝\深拷贝
 #define dictSetKey(d, entry, _key_) do { \
     if ((d)->type->keyDup) \
         entry->key = (d)->type->keyDup((d)->privdata, _key_); \
@@ -228,15 +272,17 @@ typedef void (dictScanFunction)(void *privdata, const dictEntry *de);
         entry->key = (_key_); \
 } while(0)
 
-// 比对两个键
+// 比对两个键，有那就用重载的 operator==，没有则比较 key1 key2 这两个变量的值
 #define dictCompareKeys(d, key1, key2) \
     (((d)->type->keyCompare) ? \
         (d)->type->keyCompare((d)->privdata, key1, key2) : \
         (key1) == (key2))
 
 // 计算给定键的哈希值
+// 比起直接操作 union 里面的值，这样反而会更好
+// 你可以很简单的写 union 里面的变量名字，但是通过这些宏来访问，调用者就能够很清晰的表达自己的意图
 #define dictHashKey(d, key) (d)->type->hashFunction(key)
-// 返回获取给定节点的键
+// 返回获取给定节点的键（入参数：dictEntry* he, he --> hash entry）
 #define dictGetKey(he) ((he)->key)
 // 返回获取给定节点的值
 #define dictGetVal(he) ((he)->v.val)
@@ -244,11 +290,11 @@ typedef void (dictScanFunction)(void *privdata, const dictEntry *de);
 #define dictGetSignedIntegerVal(he) ((he)->v.s64)
 // 返回给定节点的无符号整数值
 #define dictGetUnsignedIntegerVal(he) ((he)->v.u64)
-// 返回给定字典的大小
+// 返回给定字典的大小（rehash 的时候也要加进来的）
 #define dictSlots(d) ((d)->ht[0].size+(d)->ht[1].size)
 // 返回字典的已有节点数量
 #define dictSize(d) ((d)->ht[0].used+(d)->ht[1].used)
-// 查看字典是否正在 rehash
+// 查看字典是否正在 rehash（如参数：dict *ht，ht ---> hash table. 实际上就是 d 嘛）
 #define dictIsRehashing(ht) ((ht)->rehashidx != -1)
 
 /* API */
@@ -283,6 +329,8 @@ unsigned int dictGetHashFunctionSeed(void);
 unsigned long dictScan(dict *d, unsigned long v, dictScanFunction *fn, void *privdata);
 
 /* Hash table types */
+/* The following is code that we don't use for Redis currently, but that is part
+of the library. */
 extern dictType dictTypeHeapStringCopyKey;
 extern dictType dictTypeHeapStrings;
 extern dictType dictTypeHeapStringCopyKeyValue;
