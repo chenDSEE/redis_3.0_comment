@@ -166,7 +166,7 @@ void setproctitle(const char *fmt, ...);
 #ifndef BIG_ENDIAN
 #define BIG_ENDIAN __BIG_ENDIAN
 #endif
-#if (__BYTE_ORDER == __LITTLE_ENDIAN)
+#if (__BYTE_ORDER == __LITTLE_ENDIAN)   // 检查当前系统的字节序
 #define BYTE_ORDER LITTLE_ENDIAN
 #else
 #define BYTE_ORDER BIG_ENDIAN
