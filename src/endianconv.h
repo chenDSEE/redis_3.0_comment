@@ -45,7 +45,19 @@ uint64_t intrev64(uint64_t v);
 
 /* variants of the function doing the actual convertion only if the target
  * host is big endian */
+// Linux 64 bit 通常都是 LITTLE_ENDIAN
+// 核心目标：死活都要采用小端字节序来存数据
+// redis 内部的 intset 将会采用小端字节序的方式进行保存（encoding，length）
+
+// if 操作系统也是小端，那就不需要调用底层转换函数，直接就是一个空的宏
+// else 操作系统是大端，永远确保：存的是小端，操作的时候是跟主机一致的小端
+//      存进 intset 的时候，调用一次（大端 ==> 小端）
+//      从 intset 里面读取出来的时候，在调用一次（小端 ==> 大端）
+
+// only IF this system is Big-End, this macro will takes effect !!! (ifbe)
 #if (BYTE_ORDER == LITTLE_ENDIAN)
+// memrev16ifbe 在变量上原地操作，所以不需要返回值
+// intrev16ifbe 要返回值
 #define memrev16ifbe(p)
 #define memrev32ifbe(p)
 #define memrev64ifbe(p)
@@ -53,6 +65,7 @@ uint64_t intrev64(uint64_t v);
 #define intrev32ifbe(v) (v)
 #define intrev64ifbe(v) (v)
 #else
+// 底层函数实现一次翻转
 #define memrev16ifbe(p) memrev16(p)
 #define memrev32ifbe(p) memrev32(p)
 #define memrev64ifbe(p) memrev64(p)

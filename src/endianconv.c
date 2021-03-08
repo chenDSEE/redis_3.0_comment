@@ -44,8 +44,18 @@
 
 #include <stdint.h>
 
+// NOTE: 仅仅作为字节序翻转，并不是说只能够 Toggle the 16 bit unsigned integer
+// pointed by *p from little endian to big endian 的！！！
+// 下面的英文注释不太正确
+
+
 /* Toggle the 16 bit unsigned integer pointed by *p from little endian to
  * big endian */
+/**
+ * binary data(in memory): 1111 1111 1111 1111  (0xFF FF)
+ *                         [  char ] [  char ]
+ *                            x[0]      x[1]               
+*/
 void memrev16(void *p) {
     unsigned char *x = p, t;
 
@@ -54,6 +64,11 @@ void memrev16(void *p) {
     x[1] = t;
 }
 
+/**
+ * binary data(in memory): 1111 1111 1111 1111 1111 1111 1111 1111 (0xFF FF FF FF)
+ *                         [  char ] [  char ] [  char ] [  char ]
+ *                            x[0]      x[1]      x[2]      x[3]              
+*/
 /* Toggle the 32 bit unsigned integer pointed by *p from little endian to
  * big endian */
 void memrev32(void *p) {
@@ -101,6 +116,7 @@ uint64_t intrev64(uint64_t v) {
     return v;
 }
 
+// gcc -g endianconv.c -D TESTMAIN
 #ifdef TESTMAIN
 #include <stdio.h>
 
@@ -109,15 +125,15 @@ int main(void) {
 
     sprintf(buf,"ciaoroma");
     memrev16(buf);
-    printf("%s\n", buf);
+    printf("%s\n", buf);    // ic aoroma
 
     sprintf(buf,"ciaoroma");
     memrev32(buf);
-    printf("%s\n", buf);
+    printf("%s\n", buf);    // oaic roma
 
     sprintf(buf,"ciaoroma");
     memrev64(buf);
-    printf("%s\n", buf);
+    printf("%s\n", buf);    // amoroaic
 
     return 0;
 }

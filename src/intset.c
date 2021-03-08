@@ -47,9 +47,17 @@
 /* Return the required encoding for the provided value. 
  *
  * 返回适用于传入值 v 的编码方式
+ * 实际返回的是：保存 value 所需要的内存大小
  *
  * T = O(1)
  */
+/**
+ * 由于这个是 int 类型的，所以范围区间长这样（v < INT32_MIN   v < INT16_MIN 的原因）
+ * INT64_MIN < INT32_MIN < INT16_MIN < 0 < INT16_MAX < INT32_MAX < INT64_MAX
+*/
+// 先用最大的 int64_t 接收参数（尽可能避免丢失精度）
+// 然后在根据不同的数据范围区间，选择尽可能小的那种编码方式（节省空间？）
+// TODO: 之所以要采用不同的编码方式是为了什么？节省内存空间？会不会引入内存对齐问题，导致速度下降
 static uint8_t _intsetValueEncoding(int64_t v) {
     if (v < INT32_MIN || v > INT32_MAX)
         return INTSET_ENC_INT64;
@@ -63,8 +71,14 @@ static uint8_t _intsetValueEncoding(int64_t v) {
  *
  * 根据给定的编码方式 enc ，返回集合的底层数组在 pos 索引上的元素。
  *
+ * 根据跟定的解码方式 uint8_t enc；
+ * 获得指定 intset* is 上，index 为 int pos 的数字，并通过指定的 enc 编码方式来返回值
  * T = O(1)
  */
+// 返回的应该是什么字节序？当前操作系统使用的字节序
+// 编码 跟 字节序 是两回事；
+//     编码的 redis 为了节省内存而进行的数字压缩；
+//     字节序是操作系统怎么理解 int、long 这些变量在内存里面的值；
 static int64_t _intsetGetEncoded(intset *is, int pos, uint8_t enc) {
     int64_t v64;
     int32_t v32;
@@ -73,11 +87,11 @@ static int64_t _intsetGetEncoded(intset *is, int pos, uint8_t enc) {
     // ((ENCODING*)is->contents) 首先将数组转换回被编码的类型
     // 然后 ((ENCODING*)is->contents)+pos 计算出元素在数组中的正确位置
     // 之后 member(&vEnc, ..., sizeof(vEnc)) 再从数组中拷贝出正确数量的字节
-    // 如果有需要的话， memrevEncifbe(&vEnc) 会对拷贝出的字节进行大小端转换
+    // 如果有需要的话， memrevEncifbe(&vEnc) 会对拷贝出的字节进行大小端转换，转换出操作系统的字节序
     // 最后将值返回
     if (enc == INTSET_ENC_INT64) {
-        memcpy(&v64,((int64_t*)is->contents)+pos,sizeof(v64));
-        memrev64ifbe(&v64);
+        memcpy(&v64,((int64_t*)is->contents)+pos,sizeof(v64));  // 目的变量，源地址，memcpy 多长
+        memrev64ifbe(&v64); // 由于 redis 内部采用小端编码，if is big-end system，则执行转换，将小端换成大端，再传出去
         return v64;
     } else if (enc == INTSET_ENC_INT32) {
         memcpy(&v32,((int32_t*)is->contents)+pos,sizeof(v32));
@@ -93,11 +107,14 @@ static int64_t _intsetGetEncoded(intset *is, int pos, uint8_t enc) {
 /* Return the value at pos, using the configured encoding. 
  *
  * 根据集合的编码方式，返回底层数组在 pos 索引上的值
+ * 
+ * 不自己强行指定编码、解码的方式，采用 intset* is 当前的编解码方式，避免吃下自己强行指定的恶果
  *
  * T = O(1)
  */
 static int64_t _intsetGet(intset *is, int pos) {
     return _intsetGetEncoded(is,pos,intrev32ifbe(is->encoding));
+    // 之所以要 intrev32ifbe，是因为 is->encoding 采用小端字节序保存
 }
 
 /* Set the value at pos, using the configured encoding. 
@@ -118,7 +135,7 @@ static void _intsetSet(intset *is, int pos, int64_t value) {
     // 如果有需要的话， memrevEncifbe 将对值进行大小端转换
     if (encoding == INTSET_ENC_INT64) {
         ((int64_t*)is->contents)[pos] = value;
-        memrev64ifbe(((int64_t*)is->contents)+pos);
+        memrev64ifbe(((int64_t*)is->contents)+pos); // 保存的永远是小端，所以大端系统要转换之后才能存进去；拿出来的时候，也要转换之后才能用(转成大端，大端系统才能够看懂)
     } else if (encoding == INTSET_ENC_INT32) {
         ((int32_t*)is->contents)[pos] = value;
         memrev32ifbe(((int32_t*)is->contents)+pos);
@@ -137,20 +154,22 @@ static void _intsetSet(intset *is, int pos, int64_t value) {
 intset *intsetNew(void) {
 
     // 为整数集合结构分配空间
-    intset *is = zmalloc(sizeof(intset));
+    // sizeof(intset) = 8 = 4 + 4 = uint32_t + uint32_t = sizeof(encoding) + sizeof(length)
+    // new 的时候并不直接分配 数据部分的 内存
+    intset *is = zmalloc(sizeof(intset));   // 不包含柔性数字的 int8_t contents[]; 指针的！很省内存
 
     // 设置初始编码
-    is->encoding = intrev32ifbe(INTSET_ENC_INT16);
+    is->encoding = intrev32ifbe(INTSET_ENC_INT16);  // 永远都采用小端的方式进行保存
 
     // 初始化元素数量
-    is->length = 0;
+    is->length = 0; // 0 大端、小端都是 0
 
     return is;
 }
 
 /* Resize the intset 
  *
- * 调整整数集合的内存空间大小
+ * 调整整数集合的内存空间大小（扩大、缩小都可以）
  *
  * 如果调整后的大小要比集合原来的大小要大，
  * 那么集合中原有元素的值不会被改变。
@@ -159,6 +178,9 @@ intset *intsetNew(void) {
  *
  * T = O(N)
  */
+// TODO: 要是调整的大小变小了，会发生什么？里面的内容会被截断？
+// TODO: 不感觉很慢吗? 每次来新的数字，就要扩容一次，搬运一次，为什么不预分配？
+//       这是一个有序的 intset，所以即使是预分配，但是每次都会有重排序的问题，即使预分配，实际效果也不会好太多
 static intset *intsetResize(intset *is, uint32_t len) {
 
     // 计算数组的空间大小
@@ -168,7 +190,7 @@ static intset *intsetResize(intset *is, uint32_t len) {
     // 注意这里使用的是 zrealloc ，
     // 所以如果新空间大小比原来的空间大小要大，
     // 那么数组原有的数据会被保留
-    is = zrealloc(is,sizeof(intset)+size);
+    is = zrealloc(is,sizeof(intset)+size);  // 别忘了管理部分也要分配内存的
 
     return is;
 }
@@ -186,32 +208,35 @@ static intset *intsetResize(intset *is, uint32_t len) {
  * and sets "pos" to the position where "value" can be inserted. 
  *
  * 当在数组中没找到 value 时，返回 0 。
- * 并将 *pos 的值设为 value 可以插入到数组中的位置。
+ * 并将 *pos 的值设为 value 可以插入到数组中的位置。(pos 表示：你这个 value 日后要顶替掉现在 pos 上的元素，自己成为 pos 上的元素)
  *
  * T = O(log N)
  */
+// 根据 value 采用二分法找 pos
 static uint8_t intsetSearch(intset *is, int64_t value, uint32_t *pos) {
-    int min = 0, max = intrev32ifbe(is->length)-1, mid = -1;
+    int min = 0, max = intrev32ifbe(is->length)-1, mid = -1;    // 二分后的搜索范围 flag
     int64_t cur = -1;
 
     /* The value can never be found when the set is empty */
     // 处理 is 为空时的情况
     if (intrev32ifbe(is->length) == 0) {
+    /*  */
         if (pos) *pos = 0;
         return 0;
     } else {
         /* Check for the case where we know we cannot find the value,
          * but do know the insert position. */
-        // 因为底层数组是有序的，如果 value 比数组中最后一个值都要大
-        // 那么 value 肯定不存在于集合中，
-        // 并且应该将 value 添加到底层数组的最末端
         if (value > _intsetGet(is,intrev32ifbe(is->length)-1)) {
+            // 因为底层数组是有序的，如果 value 比数组中最后一个值（contents[length - 1]）都要大
+            // 那么 value 肯定不存在于集合中，
+            // 并且应该将 value 添加到底层数组的最末端, 也就是 contents[length]
             if (pos) *pos = intrev32ifbe(is->length);
             return 0;
-        // 因为底层数组是有序的，如果 value 比数组中最前一个值都要小
-        // 那么 value 肯定不存在于集合中，
-        // 并且应该将它添加到底层数组的最前端
+
         } else if (value < _intsetGet(is,0)) {
+            // 因为底层数组是有序的，如果 value 比数组中最前一个值都要小
+            // 那么 value 肯定不存在于集合中，
+            // 并且应该将它添加到底层数组的最前端
             if (pos) *pos = 0;
             return 0;
         }
@@ -227,7 +252,7 @@ static uint8_t intsetSearch(intset *is, int64_t value, uint32_t *pos) {
         } else if (value < cur) {
             max = mid-1;
         } else {
-            break;
+            break;  // matched
         }
     }
 
@@ -250,6 +275,8 @@ static uint8_t intsetSearch(intset *is, int64_t value, uint32_t *pos) {
  *
  * T = O(N)
  */
+// NOTE: 这个函数的调用，就意味着：要存储的数值 value，必然超出了当前 is->encoding 的限制
+// 当前版本并不支持降级操作
 static intset *intsetUpgradeAndAdd(intset *is, int64_t value) {
     
     // 当前的编码方式
@@ -263,18 +290,24 @@ static intset *intsetUpgradeAndAdd(intset *is, int64_t value) {
 
     // 根据 value 的值，决定是将它添加到底层数组的最前端还是最后端
     // 注意，因为 value 的编码比集合原有的其他元素的编码都要大
-    // 所以 value 要么大于集合中的所有元素，要么小于集合中的所有元素
+    // 也就暗示着： value 要么大于集合中的所有元素，要么小于集合中的所有元素
     // 因此，value 只能添加到底层数组的最前端或最后端
+    // value > 0, 那就是放在最后面，intset 原来的数据不用动
+    // value < 0, 那就是放在最前面，intset 原来的所有数据往后挪一位
     int prepend = value < 0 ? 1 : 0;
 
     /* First set new encoding and resize */
     // 更新集合的编码方式
     is->encoding = intrev32ifbe(newenc);
     // 根据新编码对集合（的底层数组）进行空间调整
+    // 加多一个坑位
     // T = O(N)
+    // TODO: 为什么这里不进行预分配？
+    //       intset 是有序的，预分配效果不会会明显（N --> k * N, 实际上只优化了 N - k 的时间）
     is = intsetResize(is,intrev32ifbe(is->length)+1);
 
-    /* Upgrade back-to-front so we don't overwrite values.
+    /* 采用新编码方式，迁移 intset（倒序拷贝） */
+    /* Upgrade back-to-front so we don't overwrite values.（从后往前进行更新，不会覆盖原有的值）
      * Note that the "prepend" variable is used to make sure we have an empty
      * space at either the beginning or the end of the intset. */
     // 根据集合原来的编码方式，从底层数组中取出集合元素
@@ -300,10 +333,14 @@ static intset *intsetUpgradeAndAdd(intset *is, int64_t value) {
     // 当添加新值时，原本的 | x | y | 的数据将被新值代替
     // |  new  |   x   |   y   |   z   |
     // T = O(N)
+    // 这个 while-loop 是一定要走完的，因为要更新 intset 里面的每一个 element 的 encode
+    // FIXME: 确实是存在一次多余的 复制操作：1. 创建新 intset 的时候，复制了一次；2. 重排序的时候，又复制了一次
     while(length--)
         _intsetSet(is,length+prepend,_intsetGetEncoded(is,length,curenc));
+        // _intsetSet(新的 intset, 原本 intset[length] 应该在的新位置, 原本 intset[length] 的新 encode 数值)
+        // prepend 实际上是预留空位给 value < 0 情况的
 
-    /* Set the value at the beginning or the end. */
+    /* Set the NEW value at the beginning or the end. */
     // 设置新值，根据 prepend 的值来决定是添加到数组头还是数组尾
     if (prepend)
         _intsetSet(is,0,value);
@@ -347,6 +384,10 @@ static intset *intsetUpgradeAndAdd(intset *is, int64_t value) {
  *
  * T = O(N)
  */
+// intset->length 也就 uint32_t, 所以 from  to 的类型没有问题
+// from to 实际上是下标，index、pos
+// 内部使用的函数，基本会保证：from to 之间的差只会是 1
+// 既可向前移动（删掉一个 element），也可以向后移动（加一个 element）
 static void intsetMoveTail(intset *is, uint32_t from, uint32_t to) {
 
     void *src, *dst;
@@ -359,12 +400,12 @@ static void intsetMoveTail(intset *is, uint32_t from, uint32_t to) {
 
     // 根据不同的编码
     // src = (Enc_t*)is->contents+from 记录移动开始的位置
-    // dst = (Enc_t*)is_.contents+to 记录移动结束的位置
+    // dst = (Enc_t*)is->contents+to 记录移动结束的位置
     // bytes *= sizeof(Enc_t) 计算一共要移动多少字节
     if (encoding == INTSET_ENC_INT64) {
-        src = (int64_t*)is->contents+from;
+        src = (int64_t*)is->contents+from;  // 指针一定要进行(int64_t*)强制转换（完成指针加法的步长设定），否则后面的 +from 无法指向想要的内存
         dst = (int64_t*)is->contents+to;
-        bytes *= sizeof(int64_t);
+        bytes *= sizeof(int64_t);   // 计算需要移动的内存总量
     } else if (encoding == INTSET_ENC_INT32) {
         src = (int32_t*)is->contents+from;
         dst = (int32_t*)is->contents+to;
@@ -377,18 +418,22 @@ static void intsetMoveTail(intset *is, uint32_t from, uint32_t to) {
 
     // 进行移动
     // T = O(N)
+    // 当发生内存重叠时，memmove 可以保证重叠内存的拷贝结果正确；但是 memcpy 并不能保证
     memmove(dst,src,bytes);
 }
 
 /* Insert an integer in the intset 
  * 
- * 尝试将元素 value 添加到整数集合中。
+ * 尝试将元素 value 添加到 指定的整数集合 中。
  *
  * *success 的值指示添加是否成功：
  * - 如果添加成功，那么将 *success 的值设为 1 。
  * - 因为元素已存在而造成添加失败时，将 *success 的值设为 0 。
  *
  * T = O(N)
+ * 
+ * TODO: 为什么要 return intset* is ?
+ * 因为一旦发生了 intset 的扩容，你是必然要更换掉外面正在用的 intset* is 指针的
  */
 intset *intsetAdd(intset *is, int64_t value, uint8_t *success) {
 
@@ -405,11 +450,20 @@ intset *intsetAdd(intset *is, int64_t value, uint8_t *success) {
     // 如果 value 的编码比整数集合现在的编码要大
     // 那么表示 value 必然可以添加到整数集合中
     // 并且整数集合需要对自身进行升级，才能满足 value 所需的编码
+
+    // 当前的 intset 未必能够满足 valuec 的要求，不满足的话，要扩大 intset
+    // 一个 intset 里面能够装很多的整型数组，但是每一个都是长短不一的，为了能够快速、统一的进行读取
+    // 避免记录每一个 intset 中 entry 的大小，直接采用统一的大小，并取决于这个 intset 里面最大的那个整型数字
+    // 这样才能够实现 intset 的随机访问，T = O(1);
+    // 毕竟一个整型数组，最多也就 8 Byte 的大小，uint64_t，你在每一个整型数组前面添加一个 uint8_t 来记录当前数字长度是不实际得的
+    // 管理节点占比 1/8，浪费得很；而且还不利于随机读取
     if (valenc > intrev32ifbe(is->encoding)) {
+        // 需要扩大编码
         /* This always succeeds, so we don't need to curry *success. */
         // T = O(N)
         return intsetUpgradeAndAdd(is,value);
     } else {
+        // 不需要扩大编码
         // 运行到这里，表示整数集合现有的编码方式适用于 value
 
         /* Abort if the value is already present in the set.
@@ -420,6 +474,7 @@ intset *intsetAdd(intset *is, int64_t value, uint8_t *success) {
         // - 如果不存在，那么可以插入 value 的位置将被保存到 pos 指针中
         //   等待后续程序使用
         if (intsetSearch(is,value,&pos)) {
+            // 失败：这个 value 已经存在了
             if (success) *success = 0;
             return is;
         }
@@ -442,6 +497,7 @@ intset *intsetAdd(intset *is, int64_t value, uint8_t *success) {
         // | x | n | y | z |
         // T = O(N)
         if (pos < intrev32ifbe(is->length)) intsetMoveTail(is,pos,pos+1);
+        // 要是 value 是最大的那个数值，那就可以不需要移动，直接把新的 value 放在最后就可以了
     }
 
     // 将新值设置到底层数组的指定位置中
@@ -454,6 +510,8 @@ intset *intsetAdd(intset *is, int64_t value, uint8_t *success) {
     return is;
 
     /* p.s. 上面的代码可以重构成以下更简单的形式：
+    NOTE: 个人觉得不太好，尤其是 C 这一类需要手动管理大量资源的，很容易因为多分支 return，
+    导致没有正确 handle 各个退出分支，增加维护难度
     
     if (valenc > intrev32ifbe(is->encoding)) {
         return intsetUpgradeAndAdd(is,value);
@@ -524,6 +582,14 @@ intset *intsetRemove(intset *is, int64_t value, int *success) {
         is->length = intrev32ifbe(len-1);
     }
 
+#if 0
+    else
+    {
+        // 这个分支实际上就是: valenc > intrev32ifbe(is->encoding)
+        // 这时候，实际上是不存在 intset 的，所以直接返回 success = 0;
+    }
+#endif
+
     return is;
 }
 
@@ -533,7 +599,7 @@ intset *intsetRemove(intset *is, int64_t value, int *success) {
  *
  * 是返回 1 ，不是返回 0 。
  *
- * T = O(log N)
+ * T = O(log N)，二分查找
  */
 uint8_t intsetFind(intset *is, int64_t value) {
 
@@ -556,12 +622,12 @@ uint8_t intsetFind(intset *is, int64_t value) {
  */
 int64_t intsetRandom(intset *is) {
     // intrev32ifbe(is->length) 取出集合的元素数量
-    // 而 rand() % intrev32ifbe(is->length) 根据元素数量计算一个随机索引
+    // 而 rand() % intrev32ifbe(is->length) 根据元素数量计算一个随机索引（取余，防止越界）
     // 然后 _intsetGet 负责根据随机索引来查找值
     return _intsetGet(is,rand()%intrev32ifbe(is->length));
 }
 
-/* Sets the value to the value at the given position. When this position is
+/* gets the value to the value at the given position. When this position is
  * out of range the function returns 0, when in range it returns 1. */
 /* 
  * 取出集合底层数组指定位置中的值，并将它保存到 value 指针中。
@@ -572,6 +638,8 @@ int64_t intsetRandom(intset *is) {
  *
  * T = O(1)
  */
+// intset[pos] 的结果将会放在 int64_t *value，返回去
+// 至于 value 会不会越界这一点，只能由调用者来保证了
 uint8_t intsetGet(intset *is, uint32_t pos, int64_t *value) {
 
     // pos < intrev32ifbe(is->length) 
@@ -602,13 +670,18 @@ uint32_t intsetLen(intset *is) {
 /* Return intset blob size in bytes. 
  *
  * 返回整数集合现在占用的字节总数量
- * 这个数量包括整数集合的结构大小，以及整数集合所有元素的总大小
+ * 这个大小包括整数集合的结构大小（头部），以及整数集合所有元素的总大小
  *
  * T = O(1)
  */
 size_t intsetBlobLen(intset *is) {
     return sizeof(intset)+intrev32ifbe(is->length)*intrev32ifbe(is->encoding);
 }
+
+
+// usage: 
+// 1) gcc -g zmalloc.c testhelp.h endianconv.c intset.c -D INTSET_TEST_MAIN
+// 2) ./a.out
 
 #ifdef INTSET_TEST_MAIN
 #include <sys/time.h>
@@ -681,8 +754,7 @@ int main(int argc, char **argv) {
     uint8_t success;
     int i;
     intset *is;
-    sranddev();
-
+    //sranddev(); I can not find this function in anywhere in Centos 8
     printf("Value encodings: "); {
         assert(_intsetValueEncoding(-32768) == INTSET_ENC_INT16);
         assert(_intsetValueEncoding(+32767) == INTSET_ENC_INT16);

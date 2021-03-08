@@ -32,16 +32,37 @@
 #define __INTSET_H
 #include <stdint.h>
 
+
+/**
+ * |<--  struct intset  -->|
+ * +------------+----------+----------------
+ * |  encoding  |  length  |  .........
+ * +------------+----------+----------------
+ *                         ^
+ *                         |
+ *                      contents(柔性数值)
+*/
+
+
+// TODO: 画一下整个结构的示意图
+// 存进来的一定是小端
+// 里面的 value 一定是唯一的，这不是一个 multi-set
 typedef struct intset {
     
-    // 编码方式
+    // 编码方式（TODO: 出于字节对齐的目的才设置为 uint32_t ?）
+    // 直接记录了每一个 整数 的大小（ sizeof(uint64_t) ）
     uint32_t encoding;
 
-    // 集合包含的元素数量
+    // 集合包含的元素数量（可以保存很多个整型数字的）
+    // contents[length - 1] 是最后一个 element
     uint32_t length;
 
-    // 保存元素的数组
-    int8_t contents[];
+    // 保存元素的数组(按照大小，有序的进行存储，从小到大)
+    // TODO: 在不同的编码方式中，int8_t 会造成什么影响？我们又要做什么措施进行补救？
+    // 参见 _intsetGetEncoded() 函数，我们总是在 stack 上创建一个变量，然后操作这个变量的内存（执行大小端统一转换）
+    // 实际上这里的 int8_t 没有任何表征意义，因为 contents 的类型会影响指针移动的步长，
+    // 在实际使用的时候，是要根据 encoding 再次强制转换的
+    int8_t contents[];  // 柔性数组
 
 } intset;
 
