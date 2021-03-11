@@ -119,7 +119,7 @@ unsigned int dictIdentityHashFunction(unsigned int key)
 static uint32_t dict_hash_function_seed = 5381;
 // 其他文件利用 dictSetHashFunctionSeed() 来访问 dict_hash_function_seed，确保 dict_hash_function_seed 无法被随意修改
 // 保护了 dict_hash_function_seed 的 private 特性，仅仅能通过 dict_hash_function_seed\dictGetHashFunctionSeed 来访问
-void dict_hash_function_seed(uint32_t seed) {
+void dictSetHashFunctionSeed(uint32_t seed) {
     dict_hash_function_seed = seed;
 }
 

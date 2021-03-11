@@ -243,9 +243,9 @@ int ll2string(char *s, size_t len, long long value) {
  * the parsed value when appropriate. */
 int string2ll(const char *s, size_t slen, long long *value) {
     const char *p = s;
-    size_t plen = 0;
+    size_t plen = 0;    // 当前处理到哪里
     int negative = 0;
-    unsigned long long v;
+    unsigned long long v;   // 异常、失败安全
 
     if (plen == slen)
         return 0;
@@ -272,32 +272,36 @@ int string2ll(const char *s, size_t slen, long long *value) {
     } else if (p[0] == '0' && slen == 1) {
         *value = 0;
         return 1;
-    } else {
+    } else {    // 不接受 "000123" 这样的字符串
         return 0;
     }
 
+    /* 转换剩下的其他位 */
     while (plen < slen && p[0] >= '0' && p[0] <= '9') {
-        if (v > (ULLONG_MAX / 10)) /* Overflow. */
+        // 进位，为 p[0] 的加入做好准备
+        if (v > (ULLONG_MAX / 10)) /* 要是进位会发生溢出，Overflow. */
             return 0;
-        v *= 10;
+        v *= 10;// 整体进位
 
-        if (v > (ULLONG_MAX - (p[0]-'0'))) /* Overflow. */
+        if (v > (ULLONG_MAX - (p[0]-'0'))) /* 要是加上 p[0] 作为个位会溢出，Overflow. */
             return 0;
-        v += p[0]-'0';
+        v += p[0]-'0';  // 加上新的个位
 
-        p++; plen++;
+        p++; plen++;    // next
     }
 
     /* Return if not all bytes were used. */
-    if (plen < slen)
+    if (plen < slen)    // string-data-buf 中间是不是混有杂质？ "123abc321" 这样的拒绝
         return 0;
 
     if (negative) {
-        if (v > ((unsigned long long)(-(LLONG_MIN+1))+1)) /* Overflow. */
+        // NOTE: 为什么不直接用 LLONG_MAX 呢？LLONG_MAX != - LLONG_MIN
+        // 要确保的是：补码的不溢出！
+        if (v > ((unsigned long long)(-(LLONG_MIN+1)) + 1)) /* Overflow. */
             return 0;
         if (value != NULL) *value = -v;
     } else {
-        if (v > LLONG_MAX) /* Overflow. */
+        if (v > LLONG_MAX) /* Overflow. 出于容纳能力的考虑，本函数是采用 uint64_t 的，外面要的是 int64_t */
             return 0;
         if (value != NULL) *value = v;
     }
