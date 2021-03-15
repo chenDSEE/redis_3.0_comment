@@ -11,7 +11,7 @@ use 'make install' to make up ELF
 2. cmd to run unit test:
    1) ./runtest --help
    2) ./runtest --list-tests
-   3) ./runtest <unit test name in 2) commond>
+   3) ./runtest --single <unit test name in 2) commond>
 
 3. ./runtest will do all the unit tests! It takes quite a long time;
 

@@ -33,15 +33,34 @@
 #include <ctype.h>
 
 /*
+ * Redis 对象
+ * 
+ * |<---             4 byte            --->|<- 4 byte ->|
+ * |<- 4 bit ->|<--  4 bit -->|<- 24 bit ->|
+ * +-----------+--------------+------------+------------+-------+
+ * |  type:4   |  encoding:4  |   lru:24   |  refcount  |  ptr  |                            
+ * +-----------+--------------+------------+------------+-------+
+ *                                                          | point to
+ *                                                      +--------+
+ *                                                      |  data  |
+ *                                                      +--------+
+ */
+
+
+
+/*
  * 创建一个新 robj 对象
  */
+// ptr 指向的是：type 类型的结构
+// 也就是 redis 顶层 key-value 中的 value（这个 value 可以是一个 zset\hash\intset... 等等）
+// TODO: 结合缓存淘汰策略来看 lru 的数据
 robj *createObject(int type, void *ptr) {
 
     robj *o = zmalloc(sizeof(*o));
 
     o->type = type;
-    o->encoding = REDIS_ENCODING_RAW;
-    o->ptr = ptr;
+    o->encoding = REDIS_ENCODING_RAW;   // 为了让本函数能够通用，所以实际 encoding 方式在外层再更新一次
+    o->ptr = ptr;   // 指向底层数据结构，底层数据结构跟 encoding 的描述是一致的
     o->refcount = 1;
 
     /* Set the LRU to the current lruclock (minutes resolution). */
@@ -53,9 +72,16 @@ robj *createObject(int type, void *ptr) {
  * string object where o->ptr points to a proper sds string. */
 // 创建一个 REDIS_ENCODING_RAW 编码的字符对象
 // 对象的指针指向一个 sds 结构
+// 使用 ptr* 指针的 C-style 字符串，创建并初始化一个顶层为 string、底层是 sds 的 redis_obj
+// 这种情况下，将会采用 o->encoding = REDIS_ENCODING_RAW;
 robj *createRawStringObject(char *ptr, size_t len) {
     return createObject(REDIS_STRING,sdsnewlen(ptr,len));
 }
+
+// 上下这两种方式的对比：
+// createRawStringObject(): 采用指针指向一个 sds，重新变更一个 sds 很简单，改改指针就好了
+// createEmbeddedStringObject(): sds 直接分配在 robj 后面，强绑定在一起，更新 sds 的内容等于重新创建一个 robj，工作量大
+//                               创建出来的是 const string
 
 /* Create a string object with encoding REDIS_ENCODING_EMBSTR, that is
  * an object where the sds string is actually an unmodifiable string
@@ -63,9 +89,19 @@ robj *createRawStringObject(char *ptr, size_t len) {
 // 创建一个 REDIS_ENCODING_EMBSTR 编码的字符对象
 // 这个字符串对象中的 sds 会和字符串对象的 redisObject 结构一起分配
 // 因此这个字符也是不可修改的
+// REDIS_ENCODING_EMBSTR: in the same chunk of memory to save space and cache misses.
+// 还有 cache miss 的考量
+/* robj-string:
+ * +-----------+--------------+------------+------------+-------+--------------+-------------
+ * |  type:4   |  encoding:4  |   lru:24   |  refcount  |  ptr  |  sds-header  |  buf......
+ * +-----------+--------------+------------+------------+-------+--------------+-------------
+ *                                                          |                  ^             
+ *                                                          |     point to     |             
+ *                                                          +------------------+                               
+ */
 robj *createEmbeddedStringObject(char *ptr, size_t len) {
-    robj *o = zmalloc(sizeof(robj)+sizeof(struct sdshdr)+len+1);
-    struct sdshdr *sh = (void*)(o+1);
+    robj *o = zmalloc(sizeof(robj)+sizeof(struct sdshdr)+len+1);    // +1 是为了 '\0'
+    struct sdshdr *sh = (void*)(o+1);   // 指针先采用 sizeof(robj) 的步长移动一次，然后再转化为 void* 给到 sh
 
     o->type = REDIS_STRING;
     o->encoding = REDIS_ENCODING_EMBSTR;
@@ -79,6 +115,7 @@ robj *createEmbeddedStringObject(char *ptr, size_t len) {
         memcpy(sh->buf,ptr,len);
         sh->buf[len] = '\0';
     } else {
+        // len 不为 0 的话，那就相当于先预分配了一定的空间给这个 const 的 embedded-string        
         memset(sh->buf,0,len+1);
     }
     return o;
@@ -90,6 +127,9 @@ robj *createEmbeddedStringObject(char *ptr, size_t len) {
  *
  * The current limit of 39 is chosen so that the biggest string object
  * we allocate as EMBSTR will still fit into the 64 byte arena of jemalloc. */
+// sizeof(robj) = 16; sizeof(sdshdr) = 8; 64 - 16 - 8 - 1('\0') = 39
+// arena = 64, 是 jmalloc 将自己内存池里面的一大块内存，分割为多个 64 byte 的小块，然后给应用程序使用
+// 既然 embedded string 是不会变用的 string，那样采用 64 作为分割点，可以更有效地利用内存，减少内存碎片
 #define REDIS_ENCODING_EMBSTR_SIZE_LIMIT 39
 robj *createStringObject(char *ptr, size_t len) {
     if (len <= REDIS_ENCODING_EMBSTR_SIZE_LIMIT)
@@ -98,6 +138,8 @@ robj *createStringObject(char *ptr, size_t len) {
         return createRawStringObject(ptr,len);
 }
 
+// TODO: 为什么 redis 要采用 string 的方式来记录数字？
+// TODO: 面对简单的数字，redis 会采用什么方式来进行保存？
 /*
  * 根据传入的整数值，创建一个字符串对象
  *
@@ -110,6 +152,8 @@ robj *createStringObjectFromLongLong(long long value) {
 
     // value 的大小符合 REDIS 共享整数的范围
     // 那么返回一个共享对象
+    // 常用对象采用这样的预先创建、共同 const 引用，能够避免大量相同小对象造成的内存碎片
+    // 而且少了 ctor、dtor 的调用，一定一定程度上缓解了系统的压力
     if (value >= 0 && value < REDIS_SHARED_INTEGERS) {
         incrRefCount(shared.integers[value]);
         o = shared.integers[value];
@@ -121,10 +165,10 @@ robj *createStringObjectFromLongLong(long long value) {
         if (value >= LONG_MIN && value <= LONG_MAX) {
             o = createObject(REDIS_STRING, NULL);
             o->encoding = REDIS_ENCODING_INT;
-            o->ptr = (void*)((long)value);
+            o->ptr = (void*)((long)value);  // 直接将数值存到指针的内存里面
 
         // 值不能用 long 类型保存（long long 类型），将值转换为字符串，
-        // 并创建一个 REDIS_ENCODING_RAW 的字符串对象来保存值
+        // 并创建一个 REDIS_ENCODING_RAW 的字符串对象来保存值(超出了操作系统的数值标识范围了)
         } else {
             o = createObject(REDIS_STRING,sdsfromlonglong(value));
         }
@@ -140,6 +184,7 @@ robj *createStringObjectFromLongLong(long long value) {
  *
  * 对象将 long double 转换为字符串来保存
  */
+// sizeof(long double) = 16 byte x 8 = 128
 robj *createStringObjectFromLongDouble(long double value) {
     char buf[256];
     int len;
@@ -150,7 +195,7 @@ robj *createStringObjectFromLongDouble(long double value) {
      * numbers will be represented in a way that when converted back into
      * a string are exactly the same as what the user typed.) */
     // 使用 17 位小数精度，这种精度可以在大部分机器上被 rounding 而不改变
-    len = snprintf(buf,sizeof(buf),"%.17Lf", value);
+    len = snprintf(buf,sizeof(buf),"%.17Lf", value);    // 仅仅作为本函数的 buf，这个 buf 上面的内容，最后会被放进 robj 里面去
 
     /* Now remove trailing zeroes after the '.' */
     // 移除尾部的 0 
@@ -160,7 +205,7 @@ robj *createStringObjectFromLongDouble(long double value) {
         char *p = buf+len-1;
         while(*p == '0') {
             p--;
-            len--;
+            len--;  // 用 len 来将多余的 0 字符去掉
         }
         // 如果不需要小数点，那么移除它
         if (*p == '.') len--;
@@ -186,6 +231,7 @@ robj *createStringObjectFromLongDouble(long double value) {
  *
  * 输出对象的 refcount 总为 1 。
  */
+// 总是彻底复制出一个新的 robj，而不会采用引用计数的方式
 robj *dupStringObject(robj *o) {
     robj *d;
 
@@ -194,10 +240,10 @@ robj *dupStringObject(robj *o) {
     switch(o->encoding) {
 
     case REDIS_ENCODING_RAW:
-        return createRawStringObject(o->ptr,sdslen(o->ptr));
+        return createRawStringObject(o->ptr,sdslen(o->ptr));    // 传递 robj->ptr, 让下层函数能够进行深拷贝
 
     case REDIS_ENCODING_EMBSTR:
-        return createEmbeddedStringObject(o->ptr,sdslen(o->ptr));
+        return createEmbeddedStringObject(o->ptr,sdslen(o->ptr));    // 传递 robj->ptr, 让下层函数能够进行深拷贝
 
     case REDIS_ENCODING_INT:
         d = createObject(REDIS_STRING, NULL);
@@ -209,8 +255,13 @@ robj *dupStringObject(robj *o) {
         redisPanic("Wrong encoding.");
         break;
     }
+
+    // return NULL; 补上这个比较好
 }
 
+
+/* 所有 redis-obj 的创建入口（函数名指定了底层数据的 encoding 方式） */
+// TODO: 再软件设计上，redis 是怎么解决顶层数据结构跟底层的映射关系的？是怎么调用相应函数完成创建的？
 /*
  * 创建一个 LINKEDLIST 编码的列表对象
  */
@@ -220,7 +271,7 @@ robj *createListObject(void) {
 
     robj *o = createObject(REDIS_LIST,l);
 
-    listSetFreeMethod(l,decrRefCountVoid);
+    listSetFreeMethod(l,decrRefCountVoid);  // TODO: 为什么要特意这样设置一下？而且是只有 list 这样
 
     o->encoding = REDIS_ENCODING_LINKEDLIST;
 
@@ -475,6 +526,10 @@ void decrRefCountVoid(void *o) {
  *    functionThatWillIncrementRefCount(obj);
  *    decrRefCount(obj);
  */
+// TODO:(DONE) 体会不到这个的用法？
+// createObject() 里面，将会默认设置 redcount = 1; 这时候，你想要创建一个临时的、匿名的 robj，然后交给其他函数使用
+// 这时候，createObject 里面的 refcount = 1; 会让你无比尴尬，别人肯定一头雾水：为什么 functionThatWillIncrementRefCount(obj); 之后，又要 decrRefCount(obj); 减一？
+// 多了这么一个 resetRefCount() 会使得代码阅读性提高很多
 robj *resetRefCount(robj *obj) {
     obj->refcount = 0;
     return obj;
@@ -503,6 +558,8 @@ int checkType(redisClient *c, robj *o, int type) {
  *  - 可以则返回 REDIS_OK ，并将 long long 值保存到 *llval 中。
  *
  *  - 不可以则返回 REDIS_ERR
+ * 
+ * 底层函数：总是异常、失败安全的
  */
 int isObjectRepresentableAsLongLong(robj *o, long long *llval) {
 
@@ -520,7 +577,8 @@ int isObjectRepresentableAsLongLong(robj *o, long long *llval) {
 }
 
 /* Try to encode a string object in order to save space */
-// 尝试对字符串对象进行编码，以节约内存。
+// TODO: 这个函数的调用时机是什么？
+// 尝试对字符串对象，尽可能采用能够节省内存空间的编码方式：int < embedded < sdd(不预留任何空间)
 robj *tryObjectEncoding(robj *o) {
     long value;
 
@@ -542,8 +600,10 @@ robj *tryObjectEncoding(robj *o) {
     /* It's not safe to encode shared objects: shared objects can be shared
      * everywhere in the "object space" of Redis and may end in places where
      * they are not handled. We handle them only as values in the keyspace. */
-     // 不对共享对象进行编码
-     if (o->refcount > 1) return o;
+    // TODO: "object space", keyspace 分别是什么？
+    // TODO: 为什么共享对象进行 encode 是 not safe 的？
+    // 不对共享对象进行编码
+    if (o->refcount > 1) return o;
 
     /* Check if we can represent this string as a long integer.
      * Note that we are sure that a string larger than 21 chars is not
@@ -559,14 +619,14 @@ robj *tryObjectEncoding(robj *o) {
         if (server.maxmemory == 0 &&
             value >= 0 &&
             value < REDIS_SHARED_INTEGERS)
-        {
+        {   // 复用 shared_obj
             decrRefCount(o);
             incrRefCount(shared.integers[value]);
             return shared.integers[value];
         } else {
             if (o->encoding == REDIS_ENCODING_RAW) sdsfree(o->ptr);
             o->encoding = REDIS_ENCODING_INT;
-            o->ptr = (void*) value;
+            o->ptr = (void*) value; // REDIS_ENCODING_INT 编码方式
             return o;
         }
     }
@@ -614,6 +674,7 @@ robj *tryObjectEncoding(robj *o) {
  * 如果对象已经是 RAW 编码的，那么对输入对象的引用计数增一，
  * 然后返回输入对象。
  */
+// 通常需要进行 decode 的都是 REDIS_ENCODING_INT，将 INT 变成可以直接读取、返回的 string
 robj *getDecodedObject(robj *o) {
     robj *dec;
 
@@ -646,7 +707,7 @@ robj *getDecodedObject(robj *o) {
  * 注意，因为字符串对象可能实际上保存的是整数值，
  * 如果出现这种情况，那么函数先将整数转换为字符串，
  * 然后再对比两个字符串，
- * 这种做法比调用 getDecodedObject() 更快
+ * 这种做法比调用 getDecodedObject() 更快（getDecodedObject 底层是调用 ll2string 的，而且 getDecodedObject 还要构建用不上的 robj，自然是比较慢的）
  *
  * Important note: when REDIS_COMPARE_BINARY is used a binary-safe comparison
  * is used. 
@@ -663,7 +724,7 @@ int compareStringObjectsWithFlags(robj *a, robj *b, int flags) {
     char bufa[128], bufb[128], *astr, *bstr;
     size_t alen, blen, minlen;
 
-    if (a == b) return 0;
+    if (a == b) return 0;   // 自我比较，没必要
 
 	// 指向字符串值，并在有需要时，将整数转换为字符串 a
     if (sdsEncodedObject(a)) {
@@ -686,8 +747,9 @@ int compareStringObjectsWithFlags(robj *a, robj *b, int flags) {
 
 	// 对比
     if (flags & REDIS_COMPARE_COLL) {
-        return strcoll(astr,bstr);
+        return strcoll(astr,bstr);  // LC_COLLATE，能够支持不同的字符（汉字等）
     } else {
+        // 二进制安全，能够兼容上面的那种方式（最为严格的检查）
         int cmp;
 
         minlen = (alen < blen) ? alen : blen;
@@ -769,22 +831,24 @@ int getDoubleFromObject(robj *o, double *target) {
         redisAssertWithInfo(NULL,o,o->type == REDIS_STRING);
 
         // 尝试从字符串中转换 double 值
-        if (sdsEncodedObject(o)) {
+        if (sdsEncodedObject(o)) {  // 是字符串类型
             errno = 0;
             value = strtod(o->ptr, &eptr);
-            if (isspace(((char*)o->ptr)[0]) ||
-                eptr[0] != '\0' ||
-                (errno == ERANGE &&
-                    (value == HUGE_VAL || value == -HUGE_VAL || value == 0)) ||
-                errno == EINVAL ||
-                isnan(value))
+            if (isspace(((char*)o->ptr)[0])
+                || eptr[0] != '\0'  // 最末尾一定要是 '\0'，代表彻底转换
+                || (errno == ERANGE // strtod 转换时，发生了范围的错误
+                    && (value == HUGE_VAL || value == -HUGE_VAL || value == 0)) // 且溢出
+                || errno == EINVAL  // 无效参数
+                || isnan(value))    // Returns whether x is a NaN (Not-A-Number) value.
                 return REDIS_ERR;
 
         // INT 编码
         } else if (o->encoding == REDIS_ENCODING_INT) {
-            value = (long)o->ptr;
+            value = (long)o->ptr;   // 必然是没有溢出的（在创建这个 robj 的时候保证了）
 
         } else {
+            // 更多的是为了日后拓展的维护，而添加这个 else
+            // handler 所有 case 总是个好习惯，路径全覆盖，防御性编程（直接通过断言，退出程序，因为这里必有 bug）
             redisPanic("Unknown string encoding");
         }
     }
@@ -939,7 +1003,7 @@ int getLongLongFromObject(robj *o, long long *target) {
  */
 int getLongLongFromObjectOrReply(redisClient *c, robj *o, long long *target, const char *msg) {
 
-    long long value; // local 变量作为临时变量，能够更好的保护 target，确保在进一步操作失败时，不会将失败的结果带出去
+    long long value; // local 变量作为临时变量，能够更好的保护 target，确保在进一步操作失败时，不会将失败的结果带出去（异常安全、错误安全）
 
     // T = O(N)
     if (getLongLongFromObject(o, &value) != REDIS_OK) {
@@ -1021,6 +1085,7 @@ unsigned long long estimateObjectIdleTime(robj *o) {
  *
  * OBJECT 命令的辅助函数，用于在不修改 LRU 时间的情况下，尝试获取 key 对象
  */
+// TODO: 看完 LRU 之后，在看这个
 robj *objectCommandLookup(redisClient *c, robj *key) {
     dictEntry *de;
 

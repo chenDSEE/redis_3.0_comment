@@ -702,6 +702,20 @@ void hashTypeConvert(robj *o, int enc) {
  * Hash type commands
  *----------------------------------------------------------------------------*/
 
+/**
+ * 实际输出案例（ redis-cli: hset key-string1 field-string value-string）
+ * 
+ * p (char*)c->argc
+ * (gdb) p (char*)c->argv[0]->ptr
+ * $26 = 0x7fd13b4b18b8 "hset"
+ * (gdb) p (char*)c->argv[1]->ptr
+ * $27 = 0x7fd13cc136b8 "key-string1"
+ * (gdb) p (char*)c->argv[2]->ptr
+ * $28 = 0x7fd13cc136e8 "field-string"
+ * (gdb) p (char*)c->argv[3]->ptr
+ * $29 = 0x7fd13cc13748 "value-string"
+*/
+
 void hsetCommand(redisClient *c) {
     int update;
     robj *o;

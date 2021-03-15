@@ -179,15 +179,16 @@
  * internally represented in multiple ways. The 'encoding' field of the object
  * is set to one of this fields for this object. */
 // 对象编码
-#define REDIS_ENCODING_RAW 0     /* Raw representation */
-#define REDIS_ENCODING_INT 1     /* Encoded as integer */
-#define REDIS_ENCODING_HT 2      /* Encoded as hash table */
-#define REDIS_ENCODING_ZIPMAP 3  /* Encoded as zipmap */
+#define REDIS_ENCODING_RAW 0        /* Raw representation, 初始化默认类型，ptr 有可能指向的是 sds（可能是 string，也可能是一个很长的数值转成的 string） */
+#define REDIS_ENCODING_INT 1        /* Encoded as integer, data 部分直接占用 ptr 的内存（8 byte） */
+#define REDIS_ENCODING_HT 2         /* Encoded as hash table */
+#define REDIS_ENCODING_ZIPMAP 3     /* Encoded as zipmap */
 #define REDIS_ENCODING_LINKEDLIST 4 /* Encoded as regular linked list */
-#define REDIS_ENCODING_ZIPLIST 5 /* Encoded as ziplist */
-#define REDIS_ENCODING_INTSET 6  /* Encoded as intset */
-#define REDIS_ENCODING_SKIPLIST 7  /* Encoded as skiplist */
-#define REDIS_ENCODING_EMBSTR 8  /* Embedded sds string encoding */
+#define REDIS_ENCODING_ZIPLIST 5    /* Encoded as ziplist */
+#define REDIS_ENCODING_INTSET 6     /* Encoded as intset */
+#define REDIS_ENCODING_SKIPLIST 7   /* Encoded as skiplist */
+#define REDIS_ENCODING_EMBSTR 8     /* Embedded sds string encoding，const 的紧凑型，最大 39 个 char（为了充分利用 malloc 的分配） */
+// REDIS_ENCODING_EMBSTR: in the same chunk of memory to save space and cache misses.
 
 /* Defines related to the dump file format. To store 32 bits lengths for short
  * keys requires a lot of space, so we check the most significant 2 bits of
@@ -394,16 +395,31 @@ typedef long long mstime_t; /* millisecond time type. */
 /* The actual Redis Object */
 /*
  * Redis 对象
+ * 
+ * |<---             4 byte            --->|<- 4 byte ->|<- 8 byte ->|
+ * |<- 4 bit ->|<--  4 bit -->|<- 24 bit ->|
+ * +-----------+--------------+------------+------------+------------+
+ * |  type:4   |  encoding:4  |   lru:24   |  refcount  |     ptr    |
+ * +-----------+--------------+------------+------------+------------+
+ *                    |                                      | point to
+ *                    |                                      |
+ *                    |                         +-------------------------+
+ *                    +------- identify ---->   |  low-level data struct  |
+ *                                              +-------------------------+
  */
 #define REDIS_LRU_BITS 24
 #define REDIS_LRU_CLOCK_MAX ((1<<REDIS_LRU_BITS)-1) /* Max value of obj->lru */
 #define REDIS_LRU_CLOCK_RESOLUTION 1000 /* LRU clock resolution in ms */
 typedef struct redisObject {
 
-    // 类型
+    // 类型(unsigned, 4 byte; but here is 4 bits)
+    // 0--4, 4 bits 足矣
+    // 对应的是 redis 的五个数据结构：string\list\hash\sorted set(zset)\set
     unsigned type:4;
 
     // 编码
+    // 每一个数据结构的底层采用了什么底层数据结构来进行保存
+    // sds\adlist\ziplist\dict\skip-list\intset ;
     unsigned encoding:4;
 
     // 对象最后一次被访问的时间
@@ -694,6 +710,7 @@ struct saveparam {
 };
 
 // 通过复用来减少内存碎片，以及减少操作耗时的共享对象
+// 预分配的，一开始就创建好了
 struct sharedObjectsStruct {
     robj *crlf, *ok, *err, *emptybulk, *czero, *cone, *cnegone, *pong, *space,
     *colon, *nullbulk, *nullmultibulk, *queued,
