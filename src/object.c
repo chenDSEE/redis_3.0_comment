@@ -336,6 +336,9 @@ robj *createHashObject(void) {
 
 /*
  * 创建一个 SKIPLIST 编码的有序集合
+ * zset 是必须同时采用 dict + skiplist 来进行数据结构化管理
+ * 而不是 zset 可以采用 skip list 或 dict 这种两底层 encoding 方式进行编码
+ * struct zset 下面是同时管着一个 dict 跟 zsl 的
  */
 robj *createZsetObject(void) {
 
@@ -346,7 +349,7 @@ robj *createZsetObject(void) {
     zs->dict = dictCreate(&zsetDictType,NULL);
     zs->zsl = zslCreate();
 
-    o = createObject(REDIS_ZSET,zs);
+    o = createObject(REDIS_ZSET,zs);    // ptr 指向 zs，zs 的底层则是 zsl + dict
 
     o->encoding = REDIS_ENCODING_SKIPLIST;
 

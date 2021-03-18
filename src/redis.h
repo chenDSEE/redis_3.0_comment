@@ -728,26 +728,40 @@ struct sharedObjectsStruct {
 
 /* ZSETs use a specialized version of Skiplists */
 /*
- * 跳跃表节点
+ * 跳跃表节点，仅仅针对 score 进行数据组织，obj 则是数据部分
  */
+// TODO:(DONE) 画一下 zskipNode 之间的样子
+// 在 t_zset.c 里面
+// 假设 zskiplist 中间的某一个节点有 8 level，那也就意味着这个节点同时在 1、2、3 ... 8 这几个 level 上，都是作为其中一个 node 使用的！
+// 每一层都会尽可能跳远一些
 typedef struct zskiplistNode {
 
     // 成员对象
+    // 采用引用计数的方式指向实际 obj，要记得相应的加减引用计数
     robj *obj;
 
-    // 分值
+    // 分值, 进行排序的依据
     double score;
 
     // 后退指针
+    // TODO:(DONE) 为什么 backward 不放进 zskiplistlevel 里面？
+    // （只会在 level 1 出现，仅仅用来进行 skiplist 的 range 遍历）
+    /* c) there is a back pointer, so it's a doubly linked list with the back
+     * pointers being only at "level 1". This allows to traverse the list
+     * from tail to head, useful for ZREVRANGE. 
+     */
     struct zskiplistNode *backward;
 
-    // 层
+    // 层(TODO:(DONE) 为什么要采用柔性数组？ TODO:(DONE) 在 step-down 的时候用？)
+    // 因为层数是不确定的。没错，之所以要记录这么多 level，就是为了能够原地 drill down
     struct zskiplistLevel {
 
         // 前进指针
         struct zskiplistNode *forward;
 
-        // 跨度
+        // 跨度（TODO:(DONE) 以什么 level 的 node 作为单位？）最底层
+        // 记录最底层 level 中，当前 node 与 forward node 之间，相隔了多少个最底层的 node 
+        // 这是用来计算：node x，在整个 skip-list 里面的 rank（名次、排名，跟 index 类似）
         unsigned int span;
 
     } level[];
@@ -756,30 +770,47 @@ typedef struct zskiplistNode {
 
 /*
  * 跳跃表
+ * 小结点总是会更接近 header
+ * score 相同的节点，将会按照 compareStringObjects 的结果大小来进行排序
+ * 可以多个 robj 拥有同一个 score，但是不能同一个 robj 拥有不同的 score（这是一个 sorted_set，而不是 multi-set ！不允许重复的 element，也就是 robj）
  */
 typedef struct zskiplist {
 
     // 表头节点和表尾节点
+    // header、tail 会不会实际存放数据？
+    // header 并不实际存放数据，是一个管理用的 node
     struct zskiplistNode *header, *tail;
 
-    // 表中节点的数量
+    // 表中节点的数量（header 节点不计算在内）
+    // 要是计算在内的话，向第一个 node 插入的时候，会有很多的麻烦（毕竟 header 节点是所有 level 都已经初始化好了的）
     unsigned long length;
 
-    // 表中层数最大的节点的层数
+    // 表中层数最大的节点的层数（header 的最高层数不在考虑范围内。header 的最高层总是直接指向 NULL，为了方便计数而留空的）
     int level;
 
 } zskiplist;
 
 /*
  * 有序集合
+ * zset 是必须同时采用 dict + skiplist 来进行数据结构化管理
+ * 而不是 zset 可以采用 skip list 或 dict 这种两底层 encoding 方式进行编码
+ * struct zset 下面是同时管着一个 dict 跟 zsl 的
+ * 
+ *    redis_obj           
+ * +------------+         zset
+ * |  robj.ptr  | ---> +---------+
+ * +------------+      |  *dict  | ------> 
+ *                     +---------+
+ *                     |  *zsl   | ------> 
+ *                     +---------+
  */
 typedef struct zset {
 
-    // 字典，键为成员，值为分值
+    // 字典当中，key 为 member，value 为 score
     // 用于支持 O(1) 复杂度的按成员取分值操作
     dict *dict;
 
-    // 跳跃表，按分值排序成员
+    // 跳跃表，按 score 排序成员
     // 用于支持平均复杂度为 O(log N) 的按分值定位成员操作
     // 以及范围操作
     zskiplist *zsl;
