@@ -505,6 +505,7 @@ void decrRefCount(robj *o) {
  *
  * 作用于特定数据结构的释放函数包装
  */
+// listTypeConvert() 将 list 的底层数据结构从 ziplist 转换为普通的 list
 void decrRefCountVoid(void *o) {
     decrRefCount(o);
 }
@@ -545,6 +546,7 @@ robj *resetRefCount(robj *obj) {
  *
  *  - 不相同返回 1 ，并向客户端回复一个错误
  */
+// 传入 c 只是为了 reply 对错情况
 int checkType(redisClient *c, robj *o, int type) {
 
     if (o->type != type) {
@@ -582,6 +584,8 @@ int isObjectRepresentableAsLongLong(robj *o, long long *llval) {
 /* Try to encode a string object in order to save space */
 // TODO: 这个函数的调用时机是什么？
 // 尝试对字符串对象，尽可能采用能够节省内存空间的编码方式：int < embedded < sdd(不预留任何空间)
+// 当外界 cmd 进来之后，尝试压缩 value 中的编码方式，节省内存
+// 因为 CLI 进来的 CMD，基本上全部都是字符串，而这些字符串往往都是要放进 list\zset\dict 里面，所以，可以利用这个函数对 CMD 中的 string 先进行压缩
 robj *tryObjectEncoding(robj *o) {
     long value;
 

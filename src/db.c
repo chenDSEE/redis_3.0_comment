@@ -108,9 +108,11 @@ robj *lookupKeyRead(redisDb *db, robj *key) {
  *
  * 找到时返回值对象，没找到返回 NULL 。
  */
+// 本函数的底层可能会触发 rehash
 robj *lookupKeyWrite(redisDb *db, robj *key) {
 
     // 删除过期键
+    // TODO: 为什么？过期的 key 不会自动删除的吗？惰性删除？避免满天飞的 timer ？
     expireIfNeeded(db,key);
 
     // 查找并返回 key 的值对象

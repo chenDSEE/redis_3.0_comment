@@ -83,8 +83,8 @@ static int checkStringLength(redisClient *c, long long size) {
  */
 
 #define REDIS_SET_NO_FLAGS 0
-#define REDIS_SET_NX (1<<0)     /* Set if key not exists. */
-#define REDIS_SET_XX (1<<1)     /* Set if key exists. */
+#define REDIS_SET_NX (1<<0)     /* Set key-value into redis only if key not exists.(只有在 key obj 不存在 redis 的时候，才执行该命令) */
+#define REDIS_SET_XX (1<<1)     /* Set key-value into redis only if key exists.（只有在 key obj 不存在 redis 的时候，才执行该命令） */
 
 void setGenericCommand(redisClient *c, 
                        int flags, // XX or NX,
@@ -95,7 +95,7 @@ void setGenericCommand(redisClient *c,
     // long long, 8 Byte, 是 int 的两倍，相当于 int64_t, 是有符号位的
     long long milliseconds = 0; /* initialized to avoid any harmness warning */
 
-    // 取出过期时间
+    // 取出过期时间（如果 CLI 有写的话），将最终转化结果放到 milliseconds 里面，等待设置进去
     if (expire) {
 
         // 取出 expire 参数的值，因为 expire 本身所储存的值是经过高度序列化的
@@ -116,8 +116,8 @@ void setGenericCommand(redisClient *c,
         if (unit == UNIT_SECONDS) milliseconds *= 1000;
     }
 
-    // 如果设置了 NX 或者 XX 参数，那么检查条件是否不符合这两个设置
-    // 在条件不符合时报错，报错的内容由 abort_reply 参数决定 TODO: 没看懂
+    // 如果设置了 NX 或者 XX 参数，那么检查条件（当前 set 命令的 key 是否存在于 redis 里面？）是否不符合这两个设置
+    // 在条件不符合时报错，报错的内容由 abort_reply 参数决定
     if ((flags & REDIS_SET_NX && lookupKeyWrite(c->db,key) != NULL) // 首先看看 flags 里面 NX 有没被 set
         || (flags & REDIS_SET_XX && lookupKeyWrite(c->db,key) == NULL))
     {
@@ -125,7 +125,7 @@ void setGenericCommand(redisClient *c,
         return;
     }
 
-    // 将键值关联到数据库, 真正的数据库存储操作
+    // 将键值关联到数据库（这个 client 当前正在 access 的那一个 DB）, 真正的数据库存储操作
     setKey(c->db,key,val);  // set a key, whatever it was existing or not, to a new object.
 
     // 将数据库设为脏
@@ -134,7 +134,7 @@ void setGenericCommand(redisClient *c,
     // 为键设置过期时间
     if (expire) setExpire(c->db,key,mstime()+milliseconds);
 
-    // 发送事件通知
+    // 发送事件通知 TODO: notify 谁？为什么要 notifi ？
     notifyKeyspaceEvent(REDIS_NOTIFY_STRING,"set",key,c->db->id);
 
     // 发送事件通知
@@ -154,7 +154,7 @@ void setCommand(redisClient *c) {
     int flags = REDIS_SET_NO_FLAGS;
 
     // 设置选项参数
-    for (j = 3; j < c->argc; j++) {
+    for (j = 3; j < c->argc; j++) { // 没有超过 3 个，说明没有待额外的参数选项，可以直接处理
         char *a = c->argv[j]->ptr;
         robj *next = (j == c->argc-1) ? NULL : c->argv[j+1];    // 取下一个参数
 
@@ -180,22 +180,27 @@ void setCommand(redisClient *c) {
         }
     }
 
-    // 尝试对值对象进行编码
+    // 尝试对 值对象(value) 进行编码
+    // TODO: 为什么不用对 key 进行压缩编码？key obj 这时候已经被 insert 进总 DB 里面去了？
     c->argv[2] = tryObjectEncoding(c->argv[2]);
 
     setGenericCommand(c,flags,c->argv[1],c->argv[2],expire,unit,NULL,NULL);
+    // 因为报错输出都会放在 client 的输出缓冲里面，所以 setGenericCommand 就没有必要检查返回值了
 }
 
+// SETNX key value
 void setnxCommand(redisClient *c) {
     c->argv[2] = tryObjectEncoding(c->argv[2]);
     setGenericCommand(c,REDIS_SET_NX,c->argv[1],c->argv[2],NULL,0,shared.cone,shared.czero);
 }
 
+// SETEX key seconds value
 void setexCommand(redisClient *c) {
     c->argv[3] = tryObjectEncoding(c->argv[3]);
     setGenericCommand(c,REDIS_SET_NO_FLAGS,c->argv[1],c->argv[3],c->argv[2],UNIT_SECONDS,NULL,NULL);
 }
 
+// PSETEX key milliseconds value
 void psetexCommand(redisClient *c) {
     c->argv[3] = tryObjectEncoding(c->argv[3]);
     setGenericCommand(c,REDIS_SET_NO_FLAGS,c->argv[1],c->argv[3],c->argv[2],UNIT_MILLISECONDS,NULL,NULL);
@@ -225,6 +230,7 @@ void getCommand(redisClient *c) {
     getGenericCommand(c);
 }
 
+// GETSET key value，将给定 key 的值设为 value ，并返回 key 的旧值(old value)。
 void getsetCommand(redisClient *c) {
 
     // 取出并返回键的值对象
@@ -243,13 +249,14 @@ void getsetCommand(redisClient *c) {
     server.dirty++;
 }
 
+// SETRANGE key offset value，用 value 参数覆写(overwrite)给定 key 所储存的字符串值，从偏移量 offset 开始。
 void setrangeCommand(redisClient *c) {
     robj *o;
     long offset;
 
     sds value = c->argv[3]->ptr;
 
-    // 取出 offset 参数
+    // 将 CLI 中的 offset 从 robj 转换为 long
     if (getLongFromObjectOrReply(c,c->argv[2],&offset,NULL) != REDIS_OK)
         return;
 
@@ -273,7 +280,7 @@ void setrangeCommand(redisClient *c) {
         }
 
         /* Return when the resulting string exceeds allowed size */
-        // 如果设置后的长度会超过 Redis 的限制的话
+        // 如果设置后的长度会超过 Redis 的限制（512 MB 的 string type robj）的话
         // 那么放弃设置，向客户端发送一个出错回复
         if (checkStringLength(c,offset+sdslen(value)) != REDIS_OK)
             return;
@@ -281,7 +288,7 @@ void setrangeCommand(redisClient *c) {
         // 如果 value 没有问题，可以设置，那么创建一个空字符串值对象
         // 并在数据库中关联键 c->argv[1] 和这个空字符串对象
         o = createObject(REDIS_STRING,sdsempty());
-        dbAdd(c->db,c->argv[1],o);
+        dbAdd(c->db,c->argv[1],o);  // 因为引用计数什么的都已经设置好了（毕竟是新创建的嘛），所以就不用 setKey 这个 wrapper 了
     } else {
         size_t olen;
 
@@ -315,10 +322,10 @@ void setrangeCommand(redisClient *c) {
     // 这里的 sdslen(value) > 0 其实可以去掉
     // 前面已经做了检测了
     if (sdslen(value) > 0) {
-        // 扩展字符串值对象
+        // 扩展字符串值对象（本身已经够长的话，就不用拓展了）
         o->ptr = sdsgrowzero(o->ptr,offset+sdslen(value));
         // 将 value 复制到字符串中的指定的位置
-        memcpy((char*)o->ptr+offset,value,sdslen(value));
+        memcpy((char*)o->ptr+offset,value,sdslen(value));   // 正式进行 set 操作
 
         // 向数据库发送键被修改的信号
         signalModifiedKey(c->db,c->argv[1]);
@@ -335,6 +342,7 @@ void setrangeCommand(redisClient *c) {
     addReplyLongLong(c,sdslen(o->ptr));
 }
 
+// GETRANGE key start end
 void getrangeCommand(redisClient *c) {
     robj *o;
     long start, end;
@@ -366,8 +374,8 @@ void getrangeCommand(redisClient *c) {
     // 将负数索引转换为整数索引
     if (start < 0) start = strlen+start;
     if (end < 0) end = strlen+end;
-    if (start < 0) start = 0;
-    if (end < 0) end = 0;
+    if (start < 0) start = 0;   // start 设置的不合理
+    if (end < 0) end = 0;       // end 设置的不合理
     if ((unsigned)end >= strlen) end = strlen-1;
 
     /* Precondition: end >= 0 && end < strlen, so the only condition where
@@ -381,6 +389,7 @@ void getrangeCommand(redisClient *c) {
     }
 }
 
+// MGET key [key ...]
 void mgetCommand(redisClient *c) {
     int j;
 
@@ -429,7 +438,7 @@ void msetGenericCommand(redisClient *c, int nx) {
             addReply(c, shared.czero);
             return;
         }
-    }
+    }   // 总是原子的，不可能部分成功，部分失败（单线程来保证的）
 
     // 设置所有键值对
     for (j = 1; j < c->argc; j += 2) {

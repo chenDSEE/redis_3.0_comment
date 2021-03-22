@@ -50,8 +50,8 @@ void listTypeTryConversion(robj *subject, robj *value) {
     // 确保 subject 为 ZIPLIST 编码
     if (subject->encoding != REDIS_ENCODING_ZIPLIST) return;
 
+    // 看字符串是否过长，过长的话，改变底层编码方式
     if (sdsEncodedObject(value) &&
-        // 看字符串是否过长
         sdslen(value->ptr) > server.list_max_ziplist_value)
             // 将编码转换为双端链表
             listTypeConvert(subject,REDIS_ENCODING_LINKEDLIST);
@@ -77,8 +77,9 @@ void listTypePush(robj *subject, robj *value, int where) {
 
     /* Check if we need to convert the ziplist */
     // 是否需要转换编码？
-    listTypeTryConversion(subject,value);
+    listTypeTryConversion(subject,value);   // 单个 node 的长度检查
 
+    // 整个 list 的长度检查，REDIS_LIST_MAX_ZIPLIST_ENTRIES 512（也未免太长了吧）
     if (subject->encoding == REDIS_ENCODING_ZIPLIST &&
         ziplistLen(subject->ptr) >= server.list_max_ziplist_entries)
             listTypeConvert(subject,REDIS_ENCODING_LINKEDLIST);
@@ -89,7 +90,7 @@ void listTypePush(robj *subject, robj *value, int where) {
         // 取出对象的值，因为 ZIPLIST 只能保存字符串或整数
         value = getDecodedObject(value);
         subject->ptr = ziplistPush(subject->ptr,value->ptr,sdslen(value->ptr),pos);
-        decrRefCount(value);
+        decrRefCount(value);    // ziplist 是编码进去的，而不是引用
 
     // 双端链表
     } else if (subject->encoding == REDIS_ENCODING_LINKEDLIST) {
@@ -200,6 +201,7 @@ unsigned long listTypeLength(robj *subject) {
  *
  * listTypeIterator 于 redis.h 文件中定义。
  */
+// robj *subject, iter 指向的 list
 listTypeIterator *listTypeInitIterator(robj *subject, long index, unsigned char direction) {
 
     listTypeIterator *li = zmalloc(sizeof(listTypeIterator));
@@ -210,6 +212,7 @@ listTypeIterator *listTypeInitIterator(robj *subject, long index, unsigned char 
 
     li->direction = direction;
 
+    // li 总是指向下一个 node，被 li 指向的 node 总是还没有被访问的
     // ZIPLIST
     if (li->encoding == REDIS_ENCODING_ZIPLIST) {
         li->zi = ziplistIndex(subject->ptr,index);
@@ -242,10 +245,14 @@ void listTypeReleaseIterator(listTypeIterator *li) {
  *
  * 如果列表中还有元素可迭代，那么返回 1 ，否则，返回 0 。
  */
+// listTypeEntry *entry 是出参数，返回迭代器 get 到的一个 entry
 int listTypeNext(listTypeIterator *li, listTypeEntry *entry) {
     /* Protect from converting when iterating */
     redisAssert(li->subject->encoding == li->encoding);
 
+    // TODO:(DONE) li 为什么要保存在这里？
+    // 参考 listTypeGet(), listTypeEntry 需要利用 li->encoding field 来确定究竟使用哪个指针
+    // 当然咯，在一个 while-loop 这一个操作确实有点点多余，但是优化起来会很影响代码
     entry->li = li;
 
     // 迭代 ZIPLIST
@@ -254,7 +261,8 @@ int listTypeNext(listTypeIterator *li, listTypeEntry *entry) {
         // 记录当前节点到 entry
         entry->zi = li->zi;
 
-        // 移动迭代器的指针
+        // 移动迭代器的指针，指向下一个 node（防止迭代器失效）
+        // 这是为了下一次进入 listTypeNext() 起作用的
         if (entry->zi != NULL) {
             if (li->direction == REDIS_TAIL)
                 li->zi = ziplistNext(li->subject->ptr,li->zi);
@@ -262,6 +270,7 @@ int listTypeNext(listTypeIterator *li, listTypeEntry *entry) {
                 li->zi = ziplistPrev(li->subject->ptr,li->zi);
             return 1;
         }
+        // else if (entry->zi == NULL) 这时候，实际上已经访问到 tail 了，到底了
 
     // 迭代双端链表
     } else if (li->encoding == REDIS_ENCODING_LINKEDLIST) {
@@ -270,7 +279,7 @@ int listTypeNext(listTypeIterator *li, listTypeEntry *entry) {
         entry->ln = li->ln;
 
         // 移动迭代器的指针
-        if (entry->ln != NULL) {
+        if (entry->ln != NULL) {    // 当迭代到末尾的时候，
             if (li->direction == REDIS_TAIL)
                 li->ln = li->ln->next;
             else
@@ -299,7 +308,7 @@ robj *listTypeGet(listTypeEntry *entry) {
 
     robj *value = NULL;
 
-    // 根据索引，从 ZIPLIST 中取出节点的值
+    // 根据 entry->zi 指定的 node，从 ZIPLIST 中取出值
     if (li->encoding == REDIS_ENCODING_ZIPLIST) {
         unsigned char *vstr;
         unsigned int vlen;
@@ -313,7 +322,7 @@ robj *listTypeGet(listTypeEntry *entry) {
             }
         }
 
-    // 从双端链表中取出节点的值
+    // 根据 entry->ln 指定的 node，从 link-list 中取出值
     } else if (li->encoding == REDIS_ENCODING_LINKEDLIST) {
         redisAssert(entry->ln != NULL);
         value = listNodeValue(entry->ln);
@@ -327,7 +336,7 @@ robj *listTypeGet(listTypeEntry *entry) {
 }
 
 /*
- * 将对象 value 插入到列表节点的之前或之后。
+ * 将对象 value 插入到列表节点 entry 的之前或之后。
  *
  * where 参数决定了插入的位置：
  *
@@ -337,7 +346,8 @@ robj *listTypeGet(listTypeEntry *entry) {
  */
 void listTypeInsert(listTypeEntry *entry, robj *value, int where) {
 
-    robj *subject = entry->li->subject;
+    robj *subject = entry->li->subject; // 链表头，说明这个 value 具体要插入哪一个链表里面
+    // entry 则是说明需要进行插入的 index，where 则是前插，还是后插
 
     // 插入到 ZIPLIST
     if (entry->li->encoding == REDIS_ENCODING_ZIPLIST) {
@@ -350,7 +360,7 @@ void listTypeInsert(listTypeEntry *entry, robj *value, int where) {
 
             /* When we insert after the current element, but the current element
              * is the tail of the list, we need to do a push. */
-            if (next == NULL) {
+            if (next == NULL) { // 说白了就是 ziplistInsert 不支持尾节点的 push 操作
                 // next 是表尾节点，push 新节点到表尾
                 subject->ptr = ziplistPush(subject->ptr,value->ptr,sdslen(value->ptr),REDIS_TAIL);
             } else {
@@ -416,7 +426,8 @@ void listTypeDelete(listTypeEntry *entry) {
         li->subject->ptr = ziplistDelete(li->subject->ptr,&p);
 
         /* Update position of the iterator depending on the direction */
-        // 删除节点之后，更新迭代器的指针
+        // 删除节点之后，更新迭代器的指针（整个 ziplist 都被迁移了，自然 zi 也是要更新的）
+        // 这里则是通过 p 来恢复 iter
         if (li->direction == REDIS_TAIL)
             li->zi = p;
         else
@@ -460,7 +471,7 @@ void listTypeConvert(robj *subject, int enc) {
 
         list *l = listCreate();
 
-        listSetFreeMethod(l,decrRefCountVoid);
+        listSetFreeMethod(l,decrRefCountVoid);  // TODO: 为什么 list 这么特别，需要这样指定回调？
 
         /* listTypeGet returns a robj with incremented refcount */
         // 遍历 ziplist ，并将里面的值全部添加到双端链表中
@@ -493,7 +504,7 @@ void pushGenericCommand(redisClient *c, int where) {
     // 取出列表对象
     robj *lobj = lookupKeyWrite(c->db,c->argv[1]);
 
-    // 如果列表对象不存在，那么可能有客户端在等待这个键的出现
+    // 如果列表对象不存在，那么 可能有 客户端在等待这个键的出现
     int may_have_waiting_clients = (lobj == NULL);
 
     if (lobj && lobj->type != REDIS_LIST) {
@@ -501,7 +512,8 @@ void pushGenericCommand(redisClient *c, int where) {
         return;
     }
 
-    // 将列表状态设置为就绪
+    // 尝试将列表状态设置为就绪（在完成 cmd 之后，才会去处理就绪队列，不会现在立即处理）
+    // 这个 flag 也很明确说明：may ！所以要实际进去 signalListAsReady() 里面试一试才知道
     if (may_have_waiting_clients) signalListAsReady(c,c->argv[1]);
 
     // 遍历所有输入值，并将它们添加到列表中
@@ -539,6 +551,7 @@ void pushGenericCommand(redisClient *c, int where) {
     server.dirty += pushed;
 }
 
+// LPUSH key value [value ...]
 void lpushCommand(redisClient *c) {
     pushGenericCommand(c,REDIS_HEAD);
 }
@@ -547,6 +560,9 @@ void rpushCommand(redisClient *c) {
     pushGenericCommand(c,REDIS_TAIL);
 }
 
+// 和 LPUSH 命令相反，当 key 不存在时， LPUSHX 命令什么也不做。
+// 触发命令 LPUSHX\RPUSHX\LINSERT
+// robj *refval 是 insert 用的，在 refval 前后进行 insert
 void pushxGenericCommand(redisClient *c, robj *refval, robj *val, int where) {
     robj *subject;
     listTypeIterator *iter;
@@ -554,17 +570,20 @@ void pushxGenericCommand(redisClient *c, robj *refval, robj *val, int where) {
     int inserted = 0;
 
     // 取出列表对象
+    // c->argv[1] 就是 list 的 key
+    // 很有意思的 if 检查：if(找到了 subject --> 看看这个 subject 是不是 REDIS_LIST)，存在一种递进检查的关系
     if ((subject = lookupKeyReadOrReply(c,c->argv[1],shared.czero)) == NULL ||
         checkType(c,subject,REDIS_LIST)) return;
 
     // 执行的是 LINSERT 命令
     if (refval != NULL) {
         /* We're not sure if this value can be inserted yet, but we cannot
-         * convert the list inside the iterator. We don't want to loop over
+         * convert the list inside the iterator.（因为一旦发生了转换，下面的 while-loop 中的迭代器将会失效） 
+         * We don't want to loop over
          * the list twice (once to see if the value can be inserted and once
          * to do the actual insert), so we assume this value can be inserted
          * and convert the ziplist to a regular list if necessary. */
-        // 看保存值 value 是否需要将列表编码转换为双端链表
+        // 看保存值 value 是否需要将列表编码转换为双端链表（默认这个 val 会被 insert 进来）
         listTypeTryConversion(subject,val);
 
         /* Seek refval from head to tail */
@@ -574,7 +593,7 @@ void pushxGenericCommand(redisClient *c, robj *refval, robj *val, int where) {
             if (listTypeEqual(&entry,refval)) {
                 // 找到了，将值插入到节点的前面或后面
                 listTypeInsert(&entry,val,where);
-                inserted = 1;
+                inserted = 1;   // 通过这么一个 flag，将代码逻辑分层，避免嵌套过深（过深的嵌套，会让代码失去灵活性，强耦合）
                 break;
             }
         }
@@ -582,7 +601,7 @@ void pushxGenericCommand(redisClient *c, robj *refval, robj *val, int where) {
 
         if (inserted) {
             /* Check if the length exceeds the ziplist length threshold. */
-            // 查看插入之后是否需要将编码转换为双端链表
+            // 查看插入之后，根据 list 的长度，决定是否需要将编码转换为双端链表
             if (subject->encoding == REDIS_ENCODING_ZIPLIST &&
                 ziplistLen(subject->ptr) > server.list_max_ziplist_entries)
                     listTypeConvert(subject,REDIS_ENCODING_LINKEDLIST);
@@ -627,9 +646,10 @@ void rpushxCommand(redisClient *c) {
 
 void linsertCommand(redisClient *c) {
 
-    // 编码 refval 对象
+    // 编码 refval 对象（毕竟日后都是要保存起来的）
     c->argv[4] = tryObjectEncoding(c->argv[4]);
 
+    // 进一步解析 CMD 命令
     if (strcasecmp(c->argv[2]->ptr,"after") == 0) {
         pushxGenericCommand(c,c->argv[3],c->argv[4],REDIS_TAIL);
 
@@ -650,6 +670,7 @@ void llenCommand(redisClient *c) {
     addReplyLongLong(c,listTypeLength(o));
 }
 
+// Get an element from a list by its index
 void lindexCommand(redisClient *c) {
 
     robj *o = lookupKeyReadOrReply(c,c->argv[1],shared.nullbulk);
@@ -658,18 +679,18 @@ void lindexCommand(redisClient *c) {
     long index;
     robj *value = NULL;
 
-    // 取出整数值对象 index
+    // 取出整数值对象 index，c->argv[2] 一般会被压缩编码，无法被 C 直接进行计算
     if ((getLongFromObjectOrReply(c, c->argv[2], &index, NULL) != REDIS_OK))
         return;
 
-    // 根据索引，遍历 ziplist ，直到指定位置
+    // 根据索引，遍历 ziplist ，直到指定位置，最坏 T = O(N)
     if (o->encoding == REDIS_ENCODING_ZIPLIST) {
         unsigned char *p;
         unsigned char *vstr;
         unsigned int vlen;
         long long vlong;
 
-        p = ziplistIndex(o->ptr,index);
+        p = ziplistIndex(o->ptr,index); // while-loop inside
 
         if (ziplistGet(p,&vstr,&vlen,&vlong)) {
             if (vstr) {
@@ -686,7 +707,7 @@ void lindexCommand(redisClient *c) {
     // 根据索引，遍历双端链表，直到指定位置
     } else if (o->encoding == REDIS_ENCODING_LINKEDLIST) {
 
-        listNode *ln = listIndex(o->ptr,index);
+        listNode *ln = listIndex(o->ptr,index); // while-loop inside
 
         if (ln != NULL) {
             value = listNodeValue(ln);
@@ -699,6 +720,8 @@ void lindexCommand(redisClient *c) {
     }
 }
 
+// LSET key index value
+// Set the value of an element in a list by its index
 void lsetCommand(redisClient *c) {
 
     // 取出列表对象
@@ -707,7 +730,7 @@ void lsetCommand(redisClient *c) {
     if (o == NULL || checkType(c,o,REDIS_LIST)) return;
     long index;
 
-    // 取出值对象 value
+    // 取出值对象 value(将会被 set 进去)
     robj *value = (c->argv[3] = tryObjectEncoding(c->argv[3]));
 
     // 取出整数值对象 index
@@ -723,13 +746,15 @@ void lsetCommand(redisClient *c) {
         // 查找索引
         p = ziplistIndex(zl,index);
         if (p == NULL) {
+            // index 上面的并没有 obj，这是一个错误的 index
             addReply(c,shared.outofrangeerr);
         } else {
-            // 删除现有的值
+            // 删除现有的值（删除了 ziplist 中的一个 node，可能会发生 ziplist 的整体迁移）
             o->ptr = ziplistDelete(o->ptr,&p);
             // 插入新值到指定索引
             value = getDecodedObject(value);
-            o->ptr = ziplistInsert(o->ptr,p,value->ptr,sdslen(value->ptr));
+            // o->ptr(ziplist 的所在)，p(准备进行 set 的节点)，value->ptr(要 set 的 value 数据部分)，sdslen(value->ptr)(数据部分的长度)
+            o->ptr = ziplistInsert(o->ptr,p,value->ptr,sdslen(value->ptr)); // 因为 ziplistIndex 的关系，现在 p 已经指向了 insert 的位置
             decrRefCount(value);
 
             addReply(c,shared.ok);
@@ -746,7 +771,7 @@ void lsetCommand(redisClient *c) {
         if (ln == NULL) {
             addReply(c,shared.outofrangeerr);
         } else {
-            // 删除旧值对象
+            // 删除旧值对象(引用计数，自动释放)
             decrRefCount((robj*)listNodeValue(ln));
             // 指向新对象
             listNodeValue(ln) = value;
@@ -818,7 +843,8 @@ void lrangeCommand(redisClient *c) {
     // 将负数索引转换成正数索引
     if (start < 0) start = llen+start;
     if (end < 0) end = llen+end;
-    if (start < 0) start = 0;
+    // 收束 start
+    if (start < 0) start = 0;   // 因为当 start = -100，llen = 20，的时候，start 只能够截断，以保证安全
 
     /* Invariant: start >= 0, so this test will be true when end < 0.
      * The range is empty when start > end or start >= length. */
@@ -826,7 +852,7 @@ void lrangeCommand(redisClient *c) {
         addReply(c,shared.emptymultibulk);
         return;
     }
-    if (end >= llen) end = llen-1;
+    if (end >= llen) end = llen-1;  // 收束 end
     rangelen = (end-start)+1;
 
     /* Return the result in form of a multi-bulk reply */
@@ -868,8 +894,12 @@ void lrangeCommand(redisClient *c) {
     }
 }
 
+// LTRIM key start stop
+// 对一个列表进行修剪(trim)，就是说，让列表只保留指定区间内的元素，不在指定区间之内的元素都将被删除。
 void ltrimCommand(redisClient *c) {
     robj *o;
+    // start\stop 是用来检查范围的合理性
+    // ltrim\rtrim 则是最终需要保留的范围，由 start\stop 转换而来
     long start, end, llen, j, ltrim, rtrim;
     list *list;
     listNode *ln;
@@ -893,23 +923,31 @@ void ltrimCommand(redisClient *c) {
 
     /* Invariant: start >= 0, so this test will be true when end < 0.
      * The range is empty when start > end or start >= length. */
+    /* 从 start\stop 转换为 ltrim\rtrim */
     if (start > end || start >= llen) {
         /* Out of range start or start > end result in empty list */
         ltrim = llen;
         rtrim = 0;
     } else {
+        /**
+         *   |<- ltrim ->|        |<- rtrim ->|
+         *   | ......... | ...... | ......... |    <--- list
+         *   |           |        |           |
+         *   +           +        +           +
+         *   0         start     stop        tail
+        */
+
         if (end >= llen) end = llen-1;
         ltrim = start;
-        rtrim = llen-end-1;
+        rtrim = llen-end-1; // 右边需要删除多少个节点
     }
 
     /* Remove list elements to perform the trim */
     // 删除指定列表两端的元素
-
     if (o->encoding == REDIS_ENCODING_ZIPLIST) {
-        // 删除左端元素
+        // 删除左端元素，从 0 开始，删除 ltrim 个 node
         o->ptr = ziplistDeleteRange(o->ptr,0,ltrim);
-        // 删除右端元素
+        // 删除右端元素，从 -rtrim 开始，删除 rtrim 个 node
         o->ptr = ziplistDeleteRange(o->ptr,-rtrim,rtrim);
 
     } else if (o->encoding == REDIS_ENCODING_LINKEDLIST) {
@@ -945,12 +983,17 @@ void ltrimCommand(redisClient *c) {
     addReply(c,shared.ok);
 }
 
+// LREM key count value
+// 根据参数 count 的值，移除列表中与参数 value 相等的元素。
+// count > 0 : 从表头开始向表尾搜索，移除与 value 相等的元素，数量为 count 。
+// count < 0 : 从表尾开始向表头搜索，移除与 value 相等的元素，数量为 count 的绝对值。
+// count = 0 : 移除表中所有与 value 相等的值。
 void lremCommand(redisClient *c) {
     robj *subject, *obj;
 
     // 编码目标对象 elem
     obj = c->argv[3] = tryObjectEncoding(c->argv[3]);
-    long toremove;
+    long toremove;      // 记录 count，CMD 打算删除几个
     long removed = 0;
     listTypeEntry entry;
 
@@ -963,6 +1006,7 @@ void lremCommand(redisClient *c) {
     if (subject == NULL || checkType(c,subject,REDIS_LIST)) return;
 
     /* Make sure obj is raw when we're dealing with a ziplist */
+    // 因为 listTypeEqual(&entry,obj)
     if (subject->encoding == REDIS_ENCODING_ZIPLIST)
         obj = getDecodedObject(obj);
 
@@ -979,7 +1023,7 @@ void lremCommand(redisClient *c) {
     // 查找，比对对象，并进行删除
     while (listTypeNext(li,&entry)) {
         if (listTypeEqual(&entry,obj)) {
-            listTypeDelete(&entry);
+            listTypeDelete(&entry); // 当 encoding == REDIS_ENCODING_ZIPLIST 的时候，delete 内部会更新 ziplist 的指针
             server.dirty++;
             removed++;
             // 已经满足删除数量，停止
@@ -1015,7 +1059,7 @@ void lremCommand(redisClient *c) {
  * since the element is not just returned but pushed against another list
  * as well. This command was originally proposed by Ezra Zygmuntowicz.
  */
-
+// robj *dstkey 目标 list 的 key， robj *dstobj 目标 list 的本体， robj *value 被 pop 的 node value
 void rpoplpushHandlePush(redisClient *c, robj *dstkey, robj *dstobj, robj *value) {
     /* Create the list if the key does not exist */
     // 如果目标列表不存在，那么创建一个
@@ -1035,6 +1079,10 @@ void rpoplpushHandlePush(redisClient *c, robj *dstkey, robj *dstobj, robj *value
     addReplyBulk(c,value);
 }
 
+// RPOPLPUSH source destination
+// 命令 RPOPLPUSH 在一个原子时间内，执行以下两个动作：
+// 1. 将列表 source 中的最后一个元素(尾元素)弹出，并返回给客户端。
+// 2. 将 source 弹出的元素插入到列表 destination ，作为 destination 列表的的头元素。
 void rpoplpushCommand(redisClient *c) {
     robj *sobj, *value;
     
@@ -1053,7 +1101,7 @@ void rpoplpushCommand(redisClient *c) {
 
         // 目标对象
         robj *dobj = lookupKeyWrite(c->db,c->argv[2]);
-        robj *touchedkey = c->argv[1];
+        robj *touchedkey = c->argv[1];  // 来源列表的 key-robj
 
         // 检查目标对象是否列表
         if (dobj && checkType(c,dobj,REDIS_LIST)) return;
@@ -1062,6 +1110,8 @@ void rpoplpushCommand(redisClient *c) {
         /* We saved touched key, and protect it, since rpoplpushHandlePush
          * may change the client command argument vector (it does not
          * currently). */
+        // TODO:(DONE) 究竟是什么时候？
+        // 不用太在意，后续版本这里被优化掉了
         incrRefCount(touchedkey);
         // 将值推入目标列表中，如果目标列表不存在，那么创建一个新列表
         rpoplpushHandlePush(c,c->argv[2],dobj,value);
@@ -1088,7 +1138,7 @@ void rpoplpushCommand(redisClient *c) {
 }
 
 /*-----------------------------------------------------------------------------
- * Blocking POP operations
+ * Blocking POP operations(只有 pop 操作是要 block 的，push 哪有 block 操作的呀)
  *----------------------------------------------------------------------------*/
 
 /* This is how the current blocking POP works, we use BLPOP as example:
@@ -1136,6 +1186,7 @@ void rpoplpushCommand(redisClient *c) {
 // timeout 阻塞的最长时限
 // target  在解除阻塞时，将结果保存到这个 key 对象，而不是返回给客户端
 //         只用于 BRPOPLPUSH 命令
+// 核心的 block 操作，当有 key 没办法
 void blockForKeys(redisClient *c, robj **keys, int numkeys, mstime_t timeout, robj *target) {
     dictEntry *de;
     list *l;
@@ -1160,10 +1211,13 @@ void blockForKeys(redisClient *c, robj **keys, int numkeys, mstime_t timeout, ro
 
         incrRefCount(keys[j]);
 
+        /* 以便快速检测当前 key 是否被 block */
         /* And in the other "side", to map keys -> clients */
         // c->db->blocking_keys 字典的键为造成客户端阻塞的键
         // 而值则是一个链表，链表中包含了所有被阻塞的客户端
         // 以下程序将阻塞键和被阻塞客户端关联起来
+        // 只有把被 block 的 key 放进 hash-table 里面去，才能够在 push 的时候，快速确认这个 key 是否被阻塞等待
+        // 是的话，那就把 push 的 node pop 给对应的 client
         de = dictFind(c->db->blocking_keys,keys[j]);
         if (de == NULL) {
             // 链表不存在，新创建一个，并将它关联到字典中
@@ -1178,6 +1232,7 @@ void blockForKeys(redisClient *c, robj **keys, int numkeys, mstime_t timeout, ro
             l = dictGetVal(de);
         }
         // 将客户端填接到被阻塞客户端的链表中
+        // 顺序记录 block 在这个 key 上面的 client，等有新的 push 进来之后，顺序响应
         listAddNodeTail(l,c);
     }
     blockClient(c,REDIS_BLOCKED_LIST);
@@ -1185,6 +1240,7 @@ void blockForKeys(redisClient *c, robj **keys, int numkeys, mstime_t timeout, ro
 
 /* Unblock a client that's waiting in a blocking operation such as BLPOP.
  * You should never call this function directly, but unblockClient() instead. */
+// 消除所有跟本 client 相关的 block 记录
 void unblockClientWaitingData(redisClient *c) {
     dictEntry *de;
     dictIterator *di;
@@ -1192,7 +1248,7 @@ void unblockClientWaitingData(redisClient *c) {
 
     redisAssertWithInfo(c,NULL,dictSize(c->bpop.keys) != 0);
 
-    // 遍历所有 key ，将它们从客户端 db->blocking_keys 的链表中移除
+    // 遍历所有 key ，将它们从客户端 db->blocking_keys 的链表中移除（dict 的 iter 是删除操作安全的迭代器）
     di = dictGetIterator(c->bpop.keys);
     /* The client may wait for multiple keys, so unblock it for every key. */
     while((de = dictNext(di)) != NULL) {
@@ -1204,7 +1260,8 @@ void unblockClientWaitingData(redisClient *c) {
 
         redisAssertWithInfo(c,key,l != NULL);
 
-        // 将指定客户端从链表中删除
+        // 将指定客户端从链表中删除（删除的是第一个找到的）
+        // 一般一个 client 只会 block 在一个 key 上面
         listDelNode(l,listSearchKey(l,c));
 
         /* If the list is empty we need to remove it to avoid wasting memory */
@@ -1212,7 +1269,7 @@ void unblockClientWaitingData(redisClient *c) {
         if (listLength(l) == 0)
             dictDelete(c->db->blocking_keys,key);
     }
-    dictReleaseIterator(di);
+    dictReleaseIterator(di);    // 避免内存泄漏
 
     /* Cleanup the client structure */
     // 清空 bpop.keys 集合（字典）
@@ -1232,8 +1289,10 @@ void unblockClientWaitingData(redisClient *c) {
  * 如果有客户端正因为等待给定 key 被 push 而阻塞，
  * 那么将这个 key 的放进 server.ready_keys 列表里面。
  *
- * 注意 db->ready_keys 是一个哈希表，
+ * 注意 db->ready_keys 是一个哈希表，而 server.ready_keys 则是一个 list
  * 这可以避免在事务或者脚本中，将同一个 key 一次又一次添加到列表的情况出现。
+ * db->ready_keys 是用来去重的（已经 ready_keys 着的 key，可以不用重复记录）
+ * server.ready_keys 顺序处理 ready 的 key
  *
  * The list will be finally processed by handleClientsBlockedOnLists() 
  *
@@ -1247,17 +1306,18 @@ void signalListAsReady(redisClient *c, robj *key) {
     if (dictFind(c->db->blocking_keys,key) == NULL) return;
 
     /* Key was already signaled? No need to queue it again. */
-    // 这个键已经被添加到 ready_keys 中了，直接返回
+    // 这个键已经被添加到 db->ready_keys 中了，直接返回
     if (dictFind(c->db->ready_keys,key) != NULL) return;
 
     /* Ok, we need to queue this key into server.ready_keys. */
     // 创建一个 readyList 结构，保存键和数据库
-    // 然后将 readyList 添加到 server.ready_keys 中
+    // 然后将 readyList(node) 添加到 server.ready_keys 中
+    // 等候 handleClientsBlockedOnLists() 进行处理
     rl = zmalloc(sizeof(*rl));
     rl->key = key;
     rl->db = c->db;
     incrRefCount(key);
-    listAddNodeTail(server.ready_keys,rl);
+    listAddNodeTail(server.ready_keys,rl);  // 把 rl 包裹进 listNode 里面进行保存
 
     /* We also add the key in the db->ready_keys dictionary in order
      * to avoid adding it multiple times into a list with a simple O(1)
@@ -1374,7 +1434,7 @@ int serveClientBlockedOnList(redisClient *receiver, robj *key, robj *dstkey, red
  * a MULTI/EXEC block, or a Lua script, terminated its execution after
  * being called by a client.
  *
- * 这个函数会在 Redis 每次执行完单个命令、事务块或 Lua 脚本之后调用。
+ * 这个函数会在 Redis 每次执行完单个命令、事务块或 Lua 脚本之后调用。processCommand() 函数的最后
  *
  * All the keys with at least one client blocked that received at least
  * one new element via some PUSH operation are accumulated into
@@ -1384,7 +1444,7 @@ int serveClientBlockedOnList(redisClient *receiver, robj *key, robj *dstkey, red
  * to serve because of the PUSH side of BRPOPLPUSH. 
  *
  * 对所有被阻塞在某个客户端的 key 来说，只要这个 key 被执行了某种 PUSH 操作
- * 那么这个 key 就会被放到 serve.ready_keys 去。
+ * 那么这个 key 就会被放到 serve.ready_keys 去。signalListAsReady()
  * 
  * 这个函数会遍历整个 serve.ready_keys 链表，
  * 并将里面的 key 的元素弹出给被阻塞客户端，
@@ -1393,9 +1453,11 @@ int serveClientBlockedOnList(redisClient *receiver, robj *key, robj *dstkey, red
  * 函数会一次又一次地进行迭代，
  * 因此它在执行 BRPOPLPUSH 命令的情况下也可以正常获取到正确的新被阻塞客户端。
  */
+// 每次处理完 CMD（processCommand()） 之后，都会来这里检查, 看看是不是 server.ready_keys 就绪了
+// 是的话，立马对 block 命令进行响应处理，避免 client 的长时间等待
 void handleClientsBlockedOnLists(void) {
 
-    // 遍历整个 ready_keys 链表
+    // 遍历整个 ready_keys 链表(里面保存了刚刚执行了 push 的 key)
     while(listLength(server.ready_keys) != 0) {
         list *l;
 
@@ -1405,7 +1467,7 @@ void handleClientsBlockedOnLists(void) {
          * when handling clients blocked into BRPOPLPUSH. */
         // 备份旧的 ready_keys ，再给服务器端赋值一个新的
         l = server.ready_keys;
-        server.ready_keys = listCreate();
+        server.ready_keys = listCreate();   // 避免在遍历的时候，signalListAsReady() 这个函数导致的插入，进而遍历不完整
 
         while(listLength(l) != 0) {
 
@@ -1417,6 +1479,7 @@ void handleClientsBlockedOnLists(void) {
 
             /* First of all remove this key from db->ready_keys so that
              * we can safely call signalListAsReady() against this key. */
+            // TODO: 为什么这么慌，难道 signalListAsReady() 这个函数会同时调用吗？
             // 从 ready_keys 中移除就绪的 key
             dictDelete(rl->db->ready_keys,rl->key);
 
@@ -1432,7 +1495,7 @@ void handleClientsBlockedOnLists(void) {
                 // 取出所有被这个 key 阻塞的客户端
                 de = dictFind(rl->db->blocking_keys,rl->key);
                 if (de) {
-                    list *clients = dictGetVal(de);
+                    list *clients = dictGetVal(de); // 所有因为这个 key 被阻塞的 client
                     int numclients = listLength(clients);
 
                     while(numclients--) {
@@ -1496,6 +1559,7 @@ void handleClientsBlockedOnLists(void) {
 }
 
 /* Blocking RPOP/LPOP */
+// BLPOP key [key ...] timeout
 void blockingPopGenericCommand(redisClient *c, int where) {
     robj *o;
     mstime_t timeout;
@@ -1505,20 +1569,20 @@ void blockingPopGenericCommand(redisClient *c, int where) {
     if (getTimeoutFromObjectOrReply(c,c->argv[c->argc-1],&timeout,UNIT_SECONDS)
         != REDIS_OK) return;
 
-    // 遍历所有列表键
+    // 遍历所有列表键（可以一次性针对不同的 list 进行 bpop 操作）
     for (j = 1; j < c->argc-1; j++) {
 
         // 取出列表键
         o = lookupKeyWrite(c->db,c->argv[j]);
 
-        // 有非空列表？
+        // 当前 key 存在
         if (o != NULL) {
             if (o->type != REDIS_LIST) {
                 addReply(c,shared.wrongtypeerr);
                 return;
             } else {
-                // 非空列表
-                if (listTypeLength(o) != 0) {
+                // 有效的 key，且是 REDIS_LIST 类型 
+                if (listTypeLength(o) != 0) {   // 这个 key 对应的 list 是不是空的？不是空的直接 pop 一个出去响应（并且 return）
                     /* Non empty list, this is like a non normal [LR]POP. */
                     char *event = (where == REDIS_HEAD) ? "lpop" : "rpop";
 
@@ -1571,7 +1635,7 @@ void blockingPopGenericCommand(redisClient *c, int where) {
     }
 
     /* If the list is empty or the key does not exists we must block */
-    // 所有输入列表键都不存在，只能阻塞了
+    // 所有输入列表键都不存在，只能阻塞了(timeout = 0 的话，意味着无限期阻塞)
     blockForKeys(c, c->argv + 1, c->argc - 2, timeout, NULL);
 }
 

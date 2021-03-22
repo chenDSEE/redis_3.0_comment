@@ -1066,6 +1066,7 @@ dictEntry *dictNext(dictIterator *iter)
 
         // 如果当前节点不为空，那么也记录下该节点的下个节点
         // 因为安全迭代器有可能会将迭代器返回的当前节点删除
+        // 参考：unblockClientWaitingData() 中，里面 iter 遍历且删除
         if (iter->entry) {
             /* We need to save the 'next' here, the iterator user
              * may delete the entry we are returning. */

@@ -475,9 +475,12 @@ typedef struct redisDb {
     dict *expires;              /* Timeout of keys with a timeout set */
 
     // 正处于阻塞状态的键
+    // key -> value: string -> list
+    // 具体被阻塞的 key -> 阻塞在这个 key 上面的 client，以及阻塞的顺序
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP) */
 
     // 可以解除阻塞的键
+    // 用来去重
     dict *ready_keys;           /* Blocked keys that received a PUSH */
 
     // 正在被 WATCH 命令监视的键
@@ -578,7 +581,7 @@ typedef struct readyList {
  */
 typedef struct redisClient {
 
-    // 套接字描述符
+    // 套接字描述符（socket fd）
     int fd;
 
     // 当前正在使用的数据库
@@ -598,8 +601,9 @@ typedef struct redisClient {
 
     // 参数数量
     int argc;
-
-    // 参数对象数组
+    // 举例：set key string，argc = 3, argv[0].ptr = "set", argv[1].ptr = "key", argv[2].ptr = "string"
+    // 参数对象数组, 之所以要用二维指针，是因为，最终的 robj 不确定有多少个
+    // 而且 robj 并不是每一个都不一样的，有时候可以通过 share 的方式来复用的，所以没必要每次都为 CLI 中的内容，都创建一个 robj
     robj **argv;
 
     // 记录被客户端执行的命令
@@ -1280,8 +1284,8 @@ struct redisServer {
     /* Blocked clients */
     unsigned int bpop_blocked_clients; /* Number of clients blocked by lists */
     list *unblocked_clients; /* list of clients to unblock before next loop */
-    list *ready_keys;        /* List of readyList structures for BLPOP & co */
-
+    list *ready_keys;        /* List of readyList structures for BLPOP & co，将会被 handleClientsBlockedOnLists() 处理 */
+    // 里面保存了刚刚执行了 push 的 key(顺序保存)，能被加入 ready_keys 的前提是：这个 key 是被 block 的
 
     /* Sort parameters - qsort_r() is only available under BSD so we
      * have to take this state global, in order to pass it to sortCompare() */
@@ -1386,13 +1390,17 @@ typedef int *redisGetKeysProc(struct redisCommand *cmd, robj **argv, int argc, i
 
 /*
  * Redis 命令
+ * 所有的命令，都在程序起来的时候被初始化为全局变量
+ * name 就是对外公开的 CLI 名称，proc 就是相应命令的函数指针，回调函数全部定义在 t_ 开头的文件里面
  */
 struct redisCommand {
 
     // 命令名字
+    // 举例：set\hset\get\hget 之类得
     char *name;
 
     // 实现函数
+    // 与 name 相对应的函数指针
     redisCommandProc *proc;
 
     // 参数个数
@@ -1457,6 +1465,9 @@ typedef struct _redisSortOperation {
 
 } redisSortOperation;
 
+// Type 类型的结构体，是为了能够兼容底层多种编码方式的存在
+// 相当于一层中间转发
+
 /* Structure to hold list iteration abstraction.
  *
  * 列表迭代器对象
@@ -1466,16 +1477,18 @@ typedef struct {
     // 列表对象
     robj *subject;
 
-    // 对象所使用的编码
+    // 对象所使用的编码（ziplist\link-list）
     unsigned char encoding;
 
     // 迭代的方向
     unsigned char direction; /* Iteration direction */
 
-    // ziplist 索引，迭代 ziplist 编码的列表时使用
+    // ziplist 索引，迭代 ziplist 编码的列表时使用（指向的这一个节点，需要多少 offset）
+    // 总是指向下一个 node
     unsigned char *zi;
 
     // 链表节点的指针，迭代双端链表编码的列表时使用
+    // 总是指向下一个 node
     listNode *ln;
 
 } listTypeIterator;
@@ -1484,16 +1497,26 @@ typedef struct {
  *
  * 迭代列表时使用的记录结构，
  * 用于保存迭代器，以及迭代器返回的列表节点。
+ * 总是需要跟 listTypeIterator 一起配合使用，因为 listTypeEenntry 并没有记录 encoding field
+ * listTypeIterator 里面的指针，总是指向下一次即将访问的 node（防止迭代器失效），被 li 指向的 node 总是还没有被访问的
+ * listTypeEenntry 里面的指针，则总是指向当前需要访问的指针（本次 while-loop 的访问数据）
  */
 typedef struct {
 
-    // 列表迭代器
+    // 列表迭代器（避免迭代器失效）
+    // listTypeGet() 里面会用到
+    // 之所以要这样存一下，是因为，当你只拿到了 listTypeEntry 这一个 struct
+    // 你是没办法确定究竟应该用 zi 还是 ln 来读取数据（你没办法判断 zi == NULL, ln == NULL 究竟是正确的，还是一个异常的行为）
+    // 所以才要利用到 li->encoding
+    // 另一个作用的地方是 listTypeDelete()，更新链表头、更新 zi（ln 不需要，因为 ln 不会整体进行内存 realloc）
     listTypeIterator *li;
 
     // ziplist 节点索引
+    // 指向当前的 node
     unsigned char *zi;  /* Entry in ziplist */
 
     // 双端链表节点指针
+    // 指向当前的 node
     listNode *ln;       /* Entry in linked list */
 
 } listTypeEntry;

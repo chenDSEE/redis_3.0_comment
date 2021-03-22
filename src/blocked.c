@@ -71,7 +71,9 @@
  * Note that if the timeout is zero (usually from the point of view of
  * commands API this means no timeout) the value stored into 'timeout'
  * is zero. */
-// 根据输入参数，取出最大等待时间
+// 根据输入参数，取出最大等待时间，int unit 指定格式
+// redisClient *c 也需要作为参数进行传递，是为了能够向 client 返回出错信息
+// robj *object 里面就是 CLI 发过来的 timeout 参数
 int getTimeoutFromObjectOrReply(redisClient *c, robj *object, mstime_t *timeout, int unit) {
     long long tval;
 
@@ -94,7 +96,7 @@ int getTimeoutFromObjectOrReply(redisClient *c, robj *object, mstime_t *timeout,
 }
 
 /* Block a client for the specific operation type. Once the REDIS_BLOCKED
- * flag is set client query buffer is not longer processed, but accumulated,
+ * flag is set client query buffer is not longer processed, but accumulated,（查询请求不会立即响应，而是存起来，等到 block 操作之后再执行）
  * and will be processed when the client is unblocked. */
 // 对给定的客户端进行阻塞
 void blockClient(redisClient *c, int btype) {
@@ -106,7 +108,7 @@ void blockClient(redisClient *c, int btype) {
 /* This function is called in the beforeSleep() function of the event loop
  * in order to process the pending input buffer of clients that were
  * unblocked after a blocking operation. */
-// 取消所有在 unblocked_clients 链表中的客户端的阻塞状态
+// 逐一取消所有在 unblocked_clients 链表中的客户端的阻塞状态
 void processUnblockedClients(void) {
     listNode *ln;
     redisClient *c;
@@ -116,7 +118,7 @@ void processUnblockedClients(void) {
         redisAssert(ln != NULL);
         c = ln->value;
         listDelNode(server.unblocked_clients,ln);
-        c->flags &= ~REDIS_UNBLOCKED;
+        c->flags &= ~REDIS_UNBLOCKED;   // 因为每次取出来的都是不同的 client，所以每次循环都要处理这个 flag
         c->btype = REDIS_BLOCKED_NONE;
 
         /* Process remaining data in the input buffer. */
