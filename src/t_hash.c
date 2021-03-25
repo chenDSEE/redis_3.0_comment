@@ -43,8 +43,9 @@
  * Note that we only check string encoded objects
  * as their string length can be queried in constant time. 
  *
- * 注意程序只检查字符串值，因为它们的长度可以在常数时间内取得。
+ * 注意程序只检查字符串值，因为它们的长度可以在常数时间内取得。（被内部记录了）
  */
+// start 跟 end 是为了兼容 hset 跟 hmset
 void hashTypeTryConversion(robj *o, robj **argv, int start, int end) {
     int i;
 
@@ -53,10 +54,11 @@ void hashTypeTryConversion(robj *o, robj **argv, int start, int end) {
 
     // 检查所有输入对象，看它们的字符串值是否超过了指定长度
     for (i = start; i <= end; i++) {
-        if (sdsEncodedObject(argv[i]) &&
-            sdslen(argv[i]->ptr) > server.hash_max_ziplist_value)
+        if (sdsEncodedObject(argv[i]) &&    // 理论上这个必然是 true 的；纯粹的数字可以触发 false，数字本身已经高度编码了，不需要再进行编码
+            sdslen(argv[i]->ptr) > server.hash_max_ziplist_value)   // #define REDIS_HASH_MAX_ZIPLIST_VALUE 64
         {
             // 将对象的编码转换成 REDIS_ENCODING_HT
+            // 将 REDIS_HASH obj 从 REDIS_ENCODING_ZIPLIST 转换为 REDIS_ENCODING_HT 的底层编码方式
             hashTypeConvert(o, REDIS_ENCODING_HT);
             break;
         }
@@ -66,9 +68,12 @@ void hashTypeTryConversion(robj *o, robj **argv, int start, int end) {
 /* Encode given objects in-place when the hash uses a dict. 
  *
  * 当 subject 的编码为 REDIS_ENCODING_HT 时，
- * 尝试对对象 o1 和 o2 进行编码，
+ * 尝试对对象 o1 和 o2 进行编码压缩，
  * 以节省更多内存。
+ * 
+ * 当 subject 是 REDIS_ENCODING_ZIPLIST 的时候，就没有必要进行了，因为在 insert ziplist 的时候，还会在编码压缩一次
  */
+// 因为 encoding 的过程中，o1 o2 的指针本身可能就会发生变化，所以直接传递二维指针
 void hashTypeTryObjectEncoding(robj *subject, robj **o1, robj **o2) {
     if (subject->encoding == REDIS_ENCODING_HT) {
         if (o1) *o1 = tryObjectEncoding(*o1);
@@ -101,7 +106,7 @@ int hashTypeGetFromZiplist(robj *o, robj *field,
     // 确保编码正确
     redisAssert(o->encoding == REDIS_ENCODING_ZIPLIST);
 
-    // 取出未编码的域
+    // 取出未编码的域（以防万一的操作）
     field = getDecodedObject(field);
 
     // 遍历 ziplist ，查找域的位置
@@ -250,6 +255,7 @@ int hashTypeExists(robj *o, robj *field) {
  *
  * 返回 1 则表示函数执行的是新添加操作。
  */
+// robj *o, REDIS_HASH obj
 int hashTypeSet(robj *o, robj *field, robj *value) {
     int update = 0;
 
@@ -258,19 +264,26 @@ int hashTypeSet(robj *o, robj *field, robj *value) {
         unsigned char *zl, *fptr, *vptr;
 
         // 解码成字符串或者数字
+        // ziplist 的压缩编码方式跟 obj 的压缩编码方式不一样
+        // 而且 ziplist 的编解码 api 并不支持直接接受 robj，再取出 robj->ptr，只能手动向 ziplist 的 api 传递 robj->ptr
+        // 要拿出 robj->ptr，只能再次解码
+        // 这里之所以要看起来如此多余的再 decode 一次，是因为 hashTypeSet() 日后可能会被其他地方调用
+        // 再次调用 getDecodedObject 是一种强保证，你看看 getDecodedObject 里面的代码，没有进行压缩编码的 robj 实际上很快就 return 了
+        // 实际上这里就像：再函数开头检查 if(ptr == NULL)
         field = getDecodedObject(field);
         value = getDecodedObject(value);
 
         // 遍历整个 ziplist ，尝试查找并更新 field （如果它已经存在的话）
+        // 采用 REDIS_ENCODING_ZIPLIST 构成的 REDIS_HT 会在 tail 顺序的保存一个 key-value 对的 field、value 字段
         zl = o->ptr;
-        fptr = ziplistIndex(zl, ZIPLIST_HEAD);
+        fptr = ziplistIndex(zl, ZIPLIST_HEAD);  // 从 ziplist 中拿出第一个 entry，然后再 ziplistFind() 里面，从头开始寻找
         if (fptr != NULL) {
             // 定位到域 field
             fptr = ziplistFind(fptr, field->ptr, sdslen(field->ptr), 1);
             if (fptr != NULL) {
                 /* Grab pointer to the value (fptr points to the field) */
                 // 定位到域的值
-                vptr = ziplistNext(zl, fptr);
+                vptr = ziplistNext(zl, fptr);   // 因为 field、value 顺序保存，所以直接拿 next
                 redisAssert(vptr != NULL);
 
                 // 标识这次操作为更新操作
@@ -302,7 +315,7 @@ int hashTypeSet(robj *o, robj *field, robj *value) {
         decrRefCount(value);
 
         /* Check if the ziplist needs to be converted to a hash table */
-        // 检查在添加操作完成之后，是否需要将 ZIPLIST 编码转换成 HT 编码
+        // 检查在添加操作完成之后，是否需要将 ZIPLIST 编码转换成 HT 编码（可以再放前一点，但是代码结构会变得很差）
         if (hashTypeLength(o) > server.hash_max_ziplist_entries)
             hashTypeConvert(o, REDIS_ENCODING_HT);
 
@@ -312,12 +325,12 @@ int hashTypeSet(robj *o, robj *field, robj *value) {
         // 添加或替换键值对到字典
         // 添加返回 1 ，替换返回 0
         if (dictReplace(o->ptr, field, value)) { /* Insert */
-            incrRefCount(field);
+            incrRefCount(field);    //  field 并不知 REDIS_HASH 里面，所以需要增加 field 的引用计数（被 REDIS_HASH obj 引用了）
         } else { /* Update */
             update = 1;
         }
 
-        incrRefCount(value);
+        incrRefCount(value);    // dict 的底层函数并不知晓引用计数，所以只能自己在这里进行引用计数的操作
     } else {
         redisPanic("Unknown hash encoding");
     }
@@ -351,13 +364,13 @@ int hashTypeDelete(robj *o, robj *field) {
             if (fptr != NULL) {
                 // 删除域和值
                 zl = ziplistDelete(zl,&fptr);
-                zl = ziplistDelete(zl,&fptr);
-                o->ptr = zl;
+                zl = ziplistDelete(zl,&fptr);   // 紧接下来的就是 value 字段
+                o->ptr = zl;    // 把新的 zl 更新到 robj 里面
                 deleted = 1;
             }
         }
 
-        decrRefCount(field);
+        decrRefCount(field);    // 因为 getDecodedObject 会增加引用计数
 
     // 从字典中删除
     } else if (o->encoding == REDIS_ENCODING_HT) {
@@ -365,7 +378,7 @@ int hashTypeDelete(robj *o, robj *field) {
             deleted = 1;
 
             /* Always check if the dictionary needs a resize after a delete. */
-            // 删除成功时，看字典是否需要收缩
+            // 删除成功时，看字典是否需要收缩。无所谓，收缩了也不会编程 ziplist（没办法 hash-table 实在是耗内存）
             if (htNeedsResize(o->ptr)) dictResize(o->ptr);
         }
 
@@ -380,6 +393,7 @@ int hashTypeDelete(robj *o, robj *field) {
  *
  * 返回哈希表的 field-value 对数量
  */
+// 很显然，形参 robj *o 只能是 REDIS_HASH
 unsigned long hashTypeLength(robj *o) {
     unsigned long length = ULONG_MAX;
 
@@ -460,7 +474,7 @@ int hashTypeNext(hashTypeIterator *hi) {
     // 迭代 ziplist
     if (hi->encoding == REDIS_ENCODING_ZIPLIST) {
         unsigned char *zl;
-        unsigned char *fptr, *vptr;
+        unsigned char *fptr, *vptr; // 为了异常安全而采用的临时变量
 
         zl = hi->subject->ptr;
         fptr = hi->fptr;
@@ -470,7 +484,7 @@ int hashTypeNext(hashTypeIterator *hi) {
         if (fptr == NULL) {
             /* Initialize cursor */
             redisAssert(vptr == NULL);
-            fptr = ziplistIndex(zl, 0);
+            fptr = ziplistIndex(zl, 0); // 可以替换为 ZIPLIST_HEAD
 
         // 获取下一个迭代节点
         } else {
@@ -510,6 +524,7 @@ int hashTypeNext(hashTypeIterator *hi) {
  *
  * 从 ziplist 编码的哈希中，取出迭代器指针当前指向节点的域或值。
  */
+// int what, 决定取出什么字段，REDIS_HASH_KEY\REDIS_HASH_VALUE
 void hashTypeCurrentFromZiplist(hashTypeIterator *hi, int what,
                                 unsigned char **vstr,
                                 unsigned int *vlen,
@@ -561,6 +576,8 @@ void hashTypeCurrentFromHashTable(hashTypeIterator *hi, int what, robj **dst) {
  *
  * 当使用完返回对象之后，调用者需要对对象执行 decrRefCount() 。
  */
+// 这里的 a non copy-on-write friendly 是指：我们会从 hashTypeCurrentFromHashTable() 里面拿到一个 robj，并且直接返回这个 robj
+// 这也就意味着，上层代码是可以直接修改这个 robj 的，上层代码的修改会直接影响到 dict 里面的 entry 内容
 robj *hashTypeCurrentObject(hashTypeIterator *hi, int what) {
     robj *dst;
 
@@ -574,6 +591,7 @@ robj *hashTypeCurrentObject(hashTypeIterator *hi, int what) {
         hashTypeCurrentFromZiplist(hi, what, &vstr, &vlen, &vll);
 
         // 创建键或值的对象
+        // 但是，ZIPLIST 的 encoding 却是 copy-on-write friendly 的，因为你不得不创建一个 robj 来装载 ziplist 里面的一个 node
         if (vstr) {
             dst = createStringObject((char*)vstr, vlen);
         } else {
@@ -600,6 +618,8 @@ robj *hashTypeCurrentObject(hashTypeIterator *hi, int what) {
  * 按 key 在数据库中查找并返回相应的哈希对象，
  * 如果对象不存在，那么创建一个新哈希对象并返回。
  */
+// 比如 CMD：hset key field value
+// 是指存不存在 key 关联的一个 REDIS_HASH ！，所以这是一个针对全局 DB 的一个操作
 robj *hashTypeLookupWriteOrCreate(redisClient *c, robj *key) {
 
     robj *o = lookupKeyWrite(c->db,key);
@@ -607,7 +627,7 @@ robj *hashTypeLookupWriteOrCreate(redisClient *c, robj *key) {
     // 对象不存在，创建新的
     if (o == NULL) {
         o = createHashObject();
-        dbAdd(c->db,key,o);
+        dbAdd(c->db,key,o); // value 刚好要设置 NULL，就用 o 代劳了
 
     // 对象存在，检查类型
     } else {
@@ -691,6 +711,7 @@ void hashTypeConvert(robj *o, int enc) {
         hashTypeConvertZiplist(o, enc);
 
     } else if (o->encoding == REDIS_ENCODING_HT) {
+        // 当前版本暂时不支持缩小规模（既然能够 hash 到一定的规模，充分证明扩容是必要的，确确实实有可能，那就没有必要再缩小了）
         redisPanic("Not implemented");
 
     } else {
@@ -716,6 +737,7 @@ void hashTypeConvert(robj *o, int enc) {
  * $29 = 0x7fd13cc13748 "value-string"
 */
 
+// HSET key field value
 void hsetCommand(redisClient *c) {
     int update;
     robj *o;
@@ -723,7 +745,11 @@ void hsetCommand(redisClient *c) {
     // 取出或新创建哈希对象
     if ((o = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
 
-    // 如果需要的话，转换哈希对象的编码
+    // 如果需要的话，转换哈希对象的编码（field、value 这两个字段都会被检查）
+    // 只做检查 field、value，并且扩容 REDIS_HASH obj，但并不会编码压缩 field、value 的 robj
+    // 之所以要在 command 这一层来做底层编码的转换检测，是因为作为中转的 HashType 这一层已经不再适合做底层编码转换了
+    // HashType 的职责是转发，再转发的中途，你竟然改变编码类型，你这个转发就自相矛盾了，所有编码类型的决策属于 commad 的 parse 过程
+    // hashType 仅仅忠实的根据 hash-robj 的编码方案，完成转发
     hashTypeTryConversion(o,c->argv,2,3);
 
     // 编码 field 和 value 对象以节约空间
@@ -745,10 +771,12 @@ void hsetCommand(redisClient *c) {
     server.dirty++;
 }
 
+// HSETNX key field value
+// Set the value of a hash field, only if the field does not exist
 void hsetnxCommand(redisClient *c) {
     robj *o;
 
-    // 取出或新创建哈希对象
+    // 取出或新创建哈希对象（看看 key 是否存在）
     if ((o = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
 
     // 如果需要的话，转换哈希对象的编码
@@ -817,6 +845,8 @@ void hmsetCommand(redisClient *c) {
     server.dirty++;
 }
 
+// HINCRBY key field increment
+// increment 是指要增加多少，是一个数字
 void hincrbyCommand(redisClient *c) {
     long long value, incr, oldvalue;
     robj *o, *current, *new;
@@ -824,7 +854,7 @@ void hincrbyCommand(redisClient *c) {
     // 取出 incr 参数的值，并创建对象
     if (getLongLongFromObjectOrReply(c,c->argv[3],&incr,NULL) != REDIS_OK) return;
 
-    // 取出或新创建哈希对象
+    // 取出或新创建哈希对象 REDIS_HASH
     if ((o = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
 
     // 取出 field 的当前值
@@ -835,7 +865,7 @@ void hincrbyCommand(redisClient *c) {
             decrRefCount(current);
             return;
         }
-        decrRefCount(current);
+        decrRefCount(current);  // 因为 hashTypeGetObject() 里面增加了引用计数
     } else {
         // 如果值当前不存在，那么默认为 0
         value = 0;
@@ -895,6 +925,8 @@ void hincrbyfloatCommand(redisClient *c) {
         // 值对象不存在，默认值为 0
         value = 0;
     }
+
+    // TODO:(DONE) 不需要检查溢出值？看起来不需要的，因为浮点数的精度本身就容易被丢失
 
     // 计算结果
     value += incr;
@@ -1008,6 +1040,7 @@ void hmgetCommand(redisClient *c) {
     }
 }
 
+// HDEL key field [field ...]   自然是 field 连同 value 一起删除
 void hdelCommand(redisClient *c) {
     robj *o;
     int j, deleted = 0, keyremoved = 0;
@@ -1132,6 +1165,7 @@ void genericHgetallCommand(redisClient *c, int flags) {
     redisAssert(count == length);
 }
 
+// HKEYS key, 返回哈希表 key 中的所有域。
 void hkeysCommand(redisClient *c) {
     genericHgetallCommand(c,REDIS_HASH_KEY);
 }
@@ -1162,5 +1196,5 @@ void hscanCommand(redisClient *c) {
     if (parseScanCursorOrReply(c,c->argv[2],&cursor) == REDIS_ERR) return;
     if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.emptyscan)) == NULL ||
         checkType(c,o,REDIS_HASH)) return;
-    scanGenericCommand(c,o,cursor);
+    scanGenericCommand(c,o,cursor); // TODO: 看完 DB 实现之后，研究一下，为什么要这样？
 }

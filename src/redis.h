@@ -167,6 +167,19 @@
 #define REDIS_CMD_SKIP_MONITOR 2048         /* "M" flag */
 #define REDIS_CMD_ASKING 4096               /* "k" flag */
 
+/**
+ * 编码层(REDIS_ENCODING_EMBSTR...) VS 对象抽象层(REDIS_STRING...)
+ * 1) 引用计数问题：
+ * 通过 grep -rn RefCount，你会发现：引用计数的加减，只会发生在 对象抽象层，也就是 t_xxx.c\db.c\object.c 之类的文件里面；
+ * 而不会在 dict.c\ziplist.c 之类的 编码层 文件里面；
+ * 这是因为编码层并不知晓 obj 这个概念，也就没有不存在什么引用计数了；
+ * 编码本身是可以通过引用的方式进行共用的，但是编码层并没有必要知晓自己是否正在被共用，
+ * 哪怕是 struct dict 这样的管理结构也是没有任何必要知道的，因为这一层仍然底层数据管理的职责中；
+ * 而引用计数时更高的层面，就比如：引用同一个 ziplist、embedded-string，引用计数这一点本身就是大家共用的能力，也没有必要再每一个不同的编码方式中实现
+ * 这也就是为什么，在 HSET CMD 里面，发生 value replace 的时候，并不会在 dict.c 里面直接 decsRefCount，因为 dict.c 这一层并不知晓 robj 的存在，
+ * 仅仅知道怎么编码，怎么解码，怎么管理、组织 dict 里面的每一个 node
+*/
+
 /* Object types */
 // 对象类型
 #define REDIS_STRING 0
@@ -179,16 +192,21 @@
  * internally represented in multiple ways. The 'encoding' field of the object
  * is set to one of this fields for this object. */
 // 对象编码
+// 整体压缩编码方式：REDIS_ENCODING_ZIPLIST，REDIS_ENCODING_INTSET，采用独立的编解码函数 zipTryEncoding(), _intsetSet()
+// 可进行独立压缩编码的 obj：REDIS_ENCODING_RAW，REDIS_ENCODING_INT，REDIS_ENCODING_EMBSTR，采用统一的 tryObjectEncoding() 进行转发
 #define REDIS_ENCODING_RAW 0        /* Raw representation, 初始化默认类型，ptr 有可能指向的是 sds（可能是 string，也可能是一个很长的数值转成的 string） */
 #define REDIS_ENCODING_INT 1        /* Encoded as integer, data 部分直接占用 ptr 的内存（8 byte） */
 #define REDIS_ENCODING_HT 2         /* Encoded as hash table */
 #define REDIS_ENCODING_ZIPMAP 3     /* Encoded as zipmap */
 #define REDIS_ENCODING_LINKEDLIST 4 /* Encoded as regular linked list */
+
+// 采用 REDIS_ENCODING_ZIPLIST 方式编码的 REDIS_HT，会将 field、value 顺序的 push-tail 进 ziplist 中
 #define REDIS_ENCODING_ZIPLIST 5    /* Encoded as ziplist */
 #define REDIS_ENCODING_INTSET 6     /* Encoded as intset */
 #define REDIS_ENCODING_SKIPLIST 7   /* Encoded as skiplist */
-#define REDIS_ENCODING_EMBSTR 8     /* Embedded sds string encoding，const 的紧凑型，最大 39 个 char（为了充分利用 malloc 的分配） */
+
 // REDIS_ENCODING_EMBSTR: in the same chunk of memory to save space and cache misses.
+#define REDIS_ENCODING_EMBSTR 8     /* Embedded sds string encoding，const 的紧凑型，最大 39 个 char（为了充分利用 malloc 的分配） */
 
 /* Defines related to the dump file format. To store 32 bits lengths for short
  * keys requires a lot of space, so we check the most significant 2 bits of
@@ -410,6 +428,13 @@ typedef long long mstime_t; /* millisecond time type. */
 #define REDIS_LRU_BITS 24
 #define REDIS_LRU_CLOCK_MAX ((1<<REDIS_LRU_BITS)-1) /* Max value of obj->lru */
 #define REDIS_LRU_CLOCK_RESOLUTION 1000 /* LRU clock resolution in ms */
+// NOTE: robj 这是一个很可怕的 struct，极度抽象化，复用度极高
+//       robj 实际上就像是一个父类，基于 robj + type + encoding 实现了很多 OO 的事情：
+//       多态 操作（比如：setTypeAdd()，通过 type 来确认继承关系，通过 encoding 来确认派生类的种类，并转发到对应的 override 函数），
+//       模板方法（比如：struct dictType 填写 callback，然后通过 api dictSetKey() 来调用，跟多态一样，利用 encoding 决定怎么转发调用），
+//       引用计数（比如：incrRefCount()），
+//       公共接口（所有的顶层抽象，都是一个个 robj），
+//       等等......
 typedef struct redisObject {
 
     // 类型(unsigned, 4 byte; but here is 4 bits)
@@ -423,6 +448,12 @@ typedef struct redisObject {
     unsigned encoding:4;
 
     // 对象最后一次被访问的时间
+    // TODO:(DONE) 既然 lru 是存在于 robj 的，那么当 hash-dict 需要进行 key 的比较的时候，
+    //       CMD 来的 lru 跟 redis-dict 里面的 robj lru 自然会是不一样的，这时候怎么比较？
+    //       比较的结果为什么还能一样？
+    // _dictKeyIndex() dictCompareKeys(), 要是有设置 keyCompare() 的回调函数，
+    // 那你就在自己版本的回调函数里面单独将 key 从 void* 里转换为 robj* 再取出 key 来进行单独的比较。
+    // 没有的话，那就直接比较两个 robj 的地址
     unsigned lru:REDIS_LRU_BITS; /* lru time (relative to server.lruclock) */
 
     // 引用计数
@@ -1533,7 +1564,7 @@ typedef struct {
     // 对象的编码
     int encoding;
 
-    // 索引值，编码为 intset 时使用
+    // 索引值，编码为 intset 时使用，intset 的遍历是直接通过 index 来完成的，所以 li 也是直接记录遍历的 index 就好
     int ii; /* intset iterator */
 
     // 字典迭代器，编码为 HT 时使用
@@ -1553,7 +1584,7 @@ typedef struct {
     // 被迭代的哈希对象
     robj *subject;
 
-    // 哈希对象的编码
+    // 哈希对象的编码（可以优化掉，毕竟在 subject 里面已经有了）
     int encoding;
 
     // 域指针和值指针
@@ -1566,6 +1597,7 @@ typedef struct {
     dictEntry *de;
 } hashTypeIterator;
 
+// 取出 field 还是 value 字段
 #define REDIS_HASH_KEY 1
 #define REDIS_HASH_VALUE 2
 

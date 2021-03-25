@@ -65,11 +65,11 @@
 typedef struct dictEntry {
     
     // 键
-    void *key;
+    void *key;  // 仅仅是指向某一个 robj，也没有必要知晓这个 robj 的大小、编码方式、引用计数
 
     // 值
     union {
-        void *val;
+        void *val;  // 仅仅是指向某一个 robj，也没有必要知晓这个 robj 的大小、编码方式、引用计数
         uint64_t u64;
         int64_t s64;
     } v;    // 实际上这里是 8 byte
@@ -83,25 +83,36 @@ typedef struct dictEntry {
 /*
  * 字典类型特定函数
  * TODO: 为什么要传递 privdata 进去，用来做什么？
+ * 
+ * struct dictType 存在的意义？
+ * 因为 REDIS_SET\REDIS_HASH 都会用到 ENCODING_HT 的编码方式，但是 REDIS_SET 只会使用 key 而不使用 value
+ * 为了能够实现多态，或者说 模板方法（dictSetKey() 这个宏，作为模板方法） 来统一创建、销毁、复制的 api 函数，所以采用 callback 的方案，在创建的时候就指定好
  */
+// 相应 callback 请参考 redis.c
 typedef struct dictType {
 
     // 计算哈希值的函数
+    // REDIS_HASH 配置为 dictEncObjHash(), REDIS_SET 配置为 dictEncObjHash()
     unsigned int (*hashFunction)(const void *key);
 
     // 复制键的函数(以便提供深拷贝函数)
+    // REDIS_HASH 配置为 NULL, REDIS_SET 配置为 NULL
     void *(*keyDup)(void *privdata, const void *key);
 
     // 复制值的函数(以便提供深拷贝函数)
+    // REDIS_HASH 配置为 NULL, REDIS_SET 配置为 NULL
     void *(*valDup)(void *privdata, const void *obj);
 
     // 对比键的函数(重载 operator= 操作符)
+    // REDIS_HASH 配置为 dictEncObjKeyCompare(), REDIS_SET 配置为 dictEncObjKeyCompare()
     int (*keyCompare)(void *privdata, const void *key1, const void *key2);
 
     // 销毁键的函数
+    // REDIS_HASH 配置为 dictRedisObjectDestructor(), REDIS_SET 配置为 dictRedisObjectDestructor()
     void (*keyDestructor)(void *privdata, void *key);
     
     // 销毁值的函数
+    // REDIS_HASH 配置为 NULL, REDIS_SET 配置为 NULL
     void (*valDestructor)(void *privdata, void *obj);
 
 } dictType;

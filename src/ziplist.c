@@ -1696,6 +1696,7 @@ unsigned char *ziplistIndex(unsigned char *zl, int index) {
  *
  * T = O(1)
  */
+// 这个操作很有用的，尤其是采用 ZIPLIST 编码方式的 REDIS_HT，从 field 取出 value，hashTypeGetFromZiplist()
 unsigned char *ziplistNext(unsigned char *zl, unsigned char *p) {
     ((void) zl);
 
@@ -1918,7 +1919,7 @@ unsigned int ziplistCompare(unsigned char *p, unsigned char *sstr, unsigned int 
  * T = O(N^2)
  */
 // unsigned char *p; 从 p 指向的那个 entry 开始整个 find 的流程
-// 注意，每次比较之前都会跳过 skip 个 entry。TODO: why? 这岂不是当成跳表来用了？
+// 注意，每次比较之前都会跳过 skip 个 entry。TODO: why? 这岂不是当成跳表来用了？暂时无视，目前版本 skip 都是 1
 unsigned char *ziplistFind(unsigned char *p, unsigned char *vstr, unsigned int vlen, unsigned int skip) {
     int skipcnt = 0;
     unsigned char vencoding = 0;    // 只是用来记录 encoding 类型罢了，不需要很长的

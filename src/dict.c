@@ -219,6 +219,7 @@ static void _dictReset(dictht *ht)  // dict hash table
  *
  * T = O(1)
  */
+// dictType *type 通常会使用 hashDictType\setDictType 这个全局变量来默认初始化响应的 callback 函数
 dict *dictCreate(dictType *type,
         void *privDataPtr)
 {
@@ -270,6 +271,7 @@ int _dictInit(dict *d, dictType *type,
  *
  * T = O(N)
  */
+// 能否调用的判断标准 htNeedsResize()
 int dictResize(dict *d)
 {
     int minimal;
@@ -513,7 +515,9 @@ int dictRehashMilliseconds(dict *d, int ms) {
  *
  * 这个函数被多个通用的查找、更新操作调用，
  * 它可以让字典在被使用的同时进行 rehash 。
- * TODO: 没看懂，用在哪？跟安全迭代器有什么关系？
+ * TODO:(DONE) 没看懂，用在哪？跟安全迭代器有什么关系？
+ * 当前的 dict 有迭代器正在运行，那就意味着：一旦发生 rehash，将会导致迭代器遍历不完整的情况
+ * 一般不会发生，但是多线程化之后，就很有可能发生了
  * T = O(1)
  */
 static void _dictRehashStep(dict *d) {
@@ -630,6 +634,9 @@ dictEntry *dictAddRaw(dict *d, void *key)
  *
  * T = O(N)
  */
+// void *key, void *val 都会是完整的 robj，而不是单纯的数据部分
+// 因为整个 dict 本身就是采用多个指针做成的，管理节点（entry）中，每一个指针都指向一块地址（没有必要知道具体是什么类型的 obj）
+// 所以才会将 robj 直接传递给 void *key, void *val
 int dictReplace(dict *d, void *key, void *val)
 {
     dictEntry *entry, auxentry;
@@ -637,7 +644,7 @@ int dictReplace(dict *d, void *key, void *val)
     /* Try to add the element. If the key
      * does not exists dictAdd will suceed. */
     // 尝试直接将键值对添加到字典
-    // 如果键 key 不存在的话，添加会成功
+    // 只有当键 key 不存在时，添加才会成功（dict 不是 multi-dict）
     // T = O(N)
     if (dictAdd(d, key, val) == DICT_OK)
         return 1;
@@ -1126,8 +1133,8 @@ dictEntry *dictGetRandomKey(dict *d)
     if (dictIsRehashing(d)) _dictRehashStep(d);
 
     // 如果正在 rehash ，那么将 1 号哈希表也作为随机查找的目标 TODO: why ? 随机 key 的获取，这个动作本身是为了什么？
-    // TODO: 当 dict 扩容之后，再大量删除 key，会不会让下面的 while-loop 变得很长？
-    // TODO: 删除大量节点之后，有没有什么动态缩小的机制？
+    // TODO:(DONE) 当 dict 扩容之后，再大量删除 key，会不会让下面的 while-loop 变得很长？可能会，就看有没有发生缩小 dict 的规模
+    // TODO:(DONE) 删除大量节点之后，有没有什么动态缩小的机制？（有，参考 tryResizeHashTables()）
     if (dictIsRehashing(d)) {
         // T = O(N)
         do {

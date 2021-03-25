@@ -79,7 +79,7 @@ robj *lookupKey(redisDb *db, robj *key) {
  * 为执行读取操作而取出键 key 在数据库 db 中的值。
  *
  * 并根据是否成功找到值，更新服务器的命中/不命中信息。
- *
+ * TODO: 服务器的命中/不命中信息 是用来干什么的？
  * 找到时返回值对象，没找到返回 NULL 。
  */
 robj *lookupKeyRead(redisDb *db, robj *key) {

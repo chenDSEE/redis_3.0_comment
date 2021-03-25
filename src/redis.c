@@ -539,9 +539,11 @@ int dictEncObjKeyCompare(void *privdata, const void *key1,
         o2->encoding == REDIS_ENCODING_INT)
             return o1->ptr == o2->ptr;
 
+    // 因为这是 key compare，key 只会有 embedded_string、raw、int 这三种编码方式的 robj，基本上被 redis 存起来就已经能够明确
+    // 需要 getDecodedObject 才能正常读取的 
     o1 = getDecodedObject(o1);
     o2 = getDecodedObject(o2);
-    cmp = dictSdsKeyCompare(privdata,o1->ptr,o2->ptr);
+    cmp = dictSdsKeyCompare(privdata,o1->ptr,o2->ptr);  // 为了能够统一的采用 ptr 来访问具体的 data，所以也就需要 decode 一下
     decrRefCount(o1);
     decrRefCount(o2);
     return cmp;
@@ -703,7 +705,7 @@ int htNeedsResize(dict *dict) {
     size = dictSlots(dict);
     used = dictSize(dict);
     return (size && used && size > DICT_HT_INITIAL_SIZE &&
-            (used*100/size < REDIS_HT_MINFILL));
+            (used*100/size < REDIS_HT_MINFILL));    // used < 10% x size, 说明 这个 dict 只用了 10% 的 bucket，完全是可以压缩的
 }
 
 /* If the percentage of used slots in the HT reaches REDIS_HT_MINFILL

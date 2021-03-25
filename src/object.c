@@ -322,6 +322,8 @@ robj *createIntsetObject(void) {
 
 /*
  * 创建一个 ZIPLIST 编码的哈希对象
+ * 对于 REDIS_HASH obj 而言，总是先采用 REDIS_ENCODING_ZIPLIST 的方式进行编码（一开始总是很小的，没必要用 dict 这种耗内存的东西）
+ * 随着 REDIS_HASH obj 的不断增长，将会改用 REDIS_ENCODING_HT，而这个转换将会发生在 hashTypeConvert() 函数里面
  */
 robj *createHashObject(void) {
 
@@ -566,6 +568,7 @@ int checkType(redisClient *c, robj *o, int type) {
  * 
  * 底层函数：总是异常、失败安全的
  */
+// setTypeCreate() 让 REDIS_SET 决定底层究竟采用什么 encoding 方法
 int isObjectRepresentableAsLongLong(robj *o, long long *llval) {
 
     redisAssertWithInfo(NULL,o,o->type == REDIS_STRING);
@@ -582,7 +585,9 @@ int isObjectRepresentableAsLongLong(robj *o, long long *llval) {
 }
 
 /* Try to encode a string object in order to save space */
-// TODO: 这个函数的调用时机是什么？
+// TODO:(DONE) 这个函数的调用时机是什么？针对装载着 字符串、纯数字 这一类的 robj 进行编码，尤其常见于 CMD 发送过来的字符串
+// 但是针对装载着 ziplist、intset 这样的整体压缩编码，并不会采用这个函数，因为，这是一个有机的整体，并不是一个单纯的 obj
+// 这对这样的整体进行压缩编码，不仅仅要关注单个 node，还要关注这个整体里面的其他 node
 // 尝试对字符串对象，尽可能采用能够节省内存空间的编码方式：int < embedded < sdd(不预留任何空间)
 // 当外界 cmd 进来之后，尝试压缩 value 中的编码方式，节省内存
 // 因为 CLI 进来的 CMD，基本上全部都是字符串，而这些字符串往往都是要放进 list\zset\dict 里面，所以，可以利用这个函数对 CMD 中的 string 先进行压缩
@@ -682,6 +687,7 @@ robj *tryObjectEncoding(robj *o) {
  * 然后返回输入对象。
  */
 // 通常需要进行 decode 的都是 REDIS_ENCODING_INT，将 INT 变成可以直接读取、返回的 string
+// 通常会创建新的对象返回，作为参数的 robj *o 通常是 read-only 的
 robj *getDecodedObject(robj *o) {
     robj *dec;
 
