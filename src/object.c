@@ -138,7 +138,7 @@ robj *createStringObject(char *ptr, size_t len) {
         return createRawStringObject(ptr,len);
 }
 
-// TODO: 为什么 redis 要采用 string 的方式来记录数字？
+// TODO: 为什么 redis 要采用 string 的方式来记录数字？(long long 跟 double 都有)
 // TODO: 面对简单的数字，redis 会采用什么方式来进行保存？
 /*
  * 根据传入的整数值，创建一个字符串对象
@@ -341,6 +341,8 @@ robj *createHashObject(void) {
  * zset 是必须同时采用 dict + skiplist 来进行数据结构化管理
  * 而不是 zset 可以采用 skip list 或 dict 这种两底层 encoding 方式进行编码
  * struct zset 下面是同时管着一个 dict 跟 zsl 的
+ * 
+ * 另一种可能是：只用 ziplist 构建 zset TODO:(DONE) 这种情况是采用排序的 zipset 来完成吗？对
  */
 robj *createZsetObject(void) {
 
@@ -688,6 +690,8 @@ robj *tryObjectEncoding(robj *o) {
  */
 // 通常需要进行 decode 的都是 REDIS_ENCODING_INT，将 INT 变成可以直接读取、返回的 string
 // 通常会创建新的对象返回，作为参数的 robj *o 通常是 read-only 的
+// 所有能够进行单个 object，都意味着他们是 REDIS_ENCODING_INT、REDIS_ENCODING_RAW、REDIS_ENCODING_EMBSTR 三选一
+// 因为其他的编码方式，都是整体的编码，里面包含很多的节点，这种是不能进行单节点 encode\decode 的
 robj *getDecodedObject(robj *o) {
     robj *dec;
 

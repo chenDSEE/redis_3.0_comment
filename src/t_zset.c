@@ -724,7 +724,8 @@ unsigned long zslDeleteRangeByRank(zskiplist *zsl, unsigned int start, unsigned 
     // 移动到排位的起始的第一个节点
     traversed++;
     x = x->level[0].forward;
-    // 删除所有在给定排位范围内的节点
+    // 删除所有在给定排位范围内的节点，此时 traversed 一定成为了 range 的 min 了
+    // x 也是移动到了 range 的 min 上的 node
     // T = O(N)
     while (x && traversed <= end) {
 
@@ -1067,7 +1068,10 @@ zskiplistNode *zslLastInLexRange(zskiplist *zsl, zlexrangespec *range) {
 }
 
 /*-----------------------------------------------------------------------------
- * Ziplist-backed sorted set API
+ * Ziplist-backed sorted set API（基于 ZIPLIST 的 sorted_set 组织方式）
+ * 之所以要这样独立封装，是因为 ziplist 得同时用两个 node 来分别装载 score 跟 member
+ * 一个 node 将会是 (member, score) pair
+ * ziplist 里的各个 node 按 score 值从小到大排列
  *----------------------------------------------------------------------------*/
 
 /*
@@ -1086,6 +1090,11 @@ double zzlGetScore(unsigned char *sptr) {
 
     if (vstr) {
         // 字符串转 double
+        // TODO: 难道是 redis-cli 发过来的时候，double 数值就是通过字符串的形式发过来的？
+        // TODO:(DONE) 因为 ziplist 没有兼容 double 的编码方式，就直接采用字符串的方案放进去？确实字符串的 double 更省内存
+        //      目前 GDB 之后，ziplist 里面确确实实就是通过 string 的方式存储 double 的数值；当 score 是 integer 的话，将会采用 ziplist 的内部编码
+        //      参考 zzlInsertAt() 中的 d2string() 调用
+        //      这也是为什么 zset 从 ziplist 中取出 score 为什么还要这个函数在封装一层的原因
         memcpy(buf,vstr,vlen);
         buf[vlen] = '\0';
         score = strtod(buf,NULL);
@@ -1132,7 +1141,7 @@ int zzlCompareElements(unsigned char *eptr, unsigned char *cstr, unsigned int cl
 
     // 取出节点中的字符串值，以及它的长度
     redisAssert(ziplistGet(eptr,&vstr,&vlen,&vlong));
-    if (vstr == NULL) {
+    if (vstr == NULL) { // 更精确的描述应该是：if (vstr == NULL && vlen = 0 && vlong != 0)  假设 vlong 初始值是 0
         /* Store string representation of long long in buf. */
         vlen = ll2string((char*)vbuf,sizeof(vbuf),vlong);
         vstr = vbuf;
@@ -1506,7 +1515,7 @@ unsigned char *zzlInsertAt(unsigned char *zl, unsigned char *eptr, robj *ele, do
     return zl;
 }
 
-/* Insert (element,score) pair in ziplist. 
+/* Insert (member, score) pair in ziplist. 
  *
  * 将 ele 成员和它的分值 score 添加到 ziplist 里面
  *
@@ -1514,7 +1523,7 @@ unsigned char *zzlInsertAt(unsigned char *zl, unsigned char *eptr, robj *ele, do
  *
  * This function assumes the element is not yet present in the list. 
  *
- * 这个函数假设 elem 不存在于有序集
+ * 这个函数假设 elem 不存在于有序集（所以上层调用函数需要自己进行保证）
  */
 unsigned char *zzlInsert(unsigned char *zl, robj *ele, double score) {
 
@@ -1522,10 +1531,12 @@ unsigned char *zzlInsert(unsigned char *zl, robj *ele, double score) {
     unsigned char *eptr = ziplistIndex(zl,0), *sptr;
     double s;
 
-    // 解码值
+    // 解码值（不一定需要执行，但是可以增强鲁棒性）
     ele = getDecodedObject(ele);
 
     // 遍历整个 ziplist
+    // 因为要从大到小进行排序，而且不必采用二分法，因为最多也就 64 个 node，
+    // 即使是最恶劣的情况，也是 64 x 64 = 4096 次操作，之后就会转换成 skip + dict 的方案
     while (eptr != NULL) {
 
         // 取出分值
@@ -1644,7 +1655,7 @@ unsigned char *zzlDeleteRangeByLex(unsigned char *zl, zlexrangespec *range, unsi
 unsigned char *zzlDeleteRangeByRank(unsigned char *zl, unsigned int start, unsigned int end, unsigned long *deleted) {
     unsigned int num = (end-start)+1;
 
-    if (deleted) *deleted = num;
+    if (deleted) *deleted = num;    // 除非能够保证 ziplistDeleteRange() 一定是顺利执行的，否则这个计数是有问题的
 
     // 每个元素占用两个节点，所以删除的其实位置要乘以 2 
     // 并且因为 ziplist 的索引以 0 为起始值，而 zzl 的起始值为 1 ，
@@ -1677,6 +1688,7 @@ unsigned int zsetLength(robj *zobj) {
 
 /*
  * 将跳跃表对象 zobj 的底层编码转换为 encoding 。
+ * REDIS_ENCODING_ZIPLIST <===> REDIS_ENCODING_SKIPLIST 两者之间可以相互转换
  */
 void zsetConvert(robj *zobj, int encoding) {
     zset *zs;
@@ -1684,6 +1696,7 @@ void zsetConvert(robj *zobj, int encoding) {
     robj *ele;
     double score;
 
+    // 类似于自我赋值，这种 case 是一定要处理的
     if (zobj->encoding == encoding) return;
 
     // 从 ZIPLIST 编码转换为 SKIPLIST 编码
@@ -1760,9 +1773,10 @@ void zsetConvert(robj *zobj, int encoding) {
         zs = zobj->ptr;
 
         // 先释放字典，因为只需要跳跃表就可以遍历整个有序集合了
+        // 释放 dict 的管理结构，内部 obj 仅仅只是减少引用计数罢了（省的待会既要把 member\score 从 dict 里面删除，又要从 zsl 里面删除）
         dictRelease(zs->dict);
 
-        // 指向跳跃表首个节点
+        // 指向跳跃表首个节点（直接使用 level[0], 这样就能遍历 zsl 里面的全部节点了）
         node = zs->zsl->header->level[0].forward;
 
         // 释放跳跃表表头
@@ -1801,6 +1815,7 @@ void zsetConvert(robj *zobj, int encoding) {
  *----------------------------------------------------------------------------*/
 
 /* This generic command implements both ZADD and ZINCRBY. */
+// 这将会是一个原子性的操作，要么全部都成功；要么全部都失败，不存在部分成功，部分失败的情况（预先检查，在备份中进行操作，回滚）
 void zaddGenericCommand(redisClient *c, int incr) {
 
     static char *nanerr = "resulting score is not a number (NaN)";
@@ -1810,7 +1825,8 @@ void zaddGenericCommand(redisClient *c, int incr) {
     robj *zobj;
     robj *curobj;
     double score = 0, *scores = NULL, curscore = 0.0;
-    int j, elements = (c->argc-2)/2;
+    int j, elements = (c->argc-2)/2;    // 去除 CMD 跟 REDIS_ZSET robj 的 key
+    // elements 是 member\score 的数量
     int added = 0, updated = 0;
 
     // 输入的 score - member 参数必须是成对出现的
@@ -1834,11 +1850,14 @@ void zaddGenericCommand(redisClient *c, int incr) {
     zobj = lookupKeyWrite(c->db,key);
     if (zobj == NULL) {
         // 有序集合不存在，创建新有序集合
+        // REDIS_ZSET_MAX_ZIPLIST_VALUE 64，REDIS_ZSET 采用 ZIPLIST 编码方式的时候，每个 node 的 member 长度不能超过 64
         if (server.zset_max_ziplist_entries == 0 ||
-            server.zset_max_ziplist_value < sdslen(c->argv[3]->ptr))
+            server.zset_max_ziplist_value < sdslen(c->argv[3]->ptr))    // TODO:(DONE) 这里采用 argv[3]（第一个 member） 将会带来什么影响？怎么消除？什么都不会发生，因为这里仅仅是利用第一个 member 的 data 长度来决定初始的 REDIS_ZSET 采用什么编码罢了
         {
+            // dict + skiplist 的方式
             zobj = createZsetObject();
         } else {
+            // TODO:(DONE) 采用 ziplist 的话，底层究竟会是什么样子？score 怎么处理？参考 redis.h:struct zset 部分
             zobj = createZsetZiplistObject();
         }
         // 关联对象到数据库
@@ -1851,9 +1870,9 @@ void zaddGenericCommand(redisClient *c, int incr) {
         }
     }
 
-    // 处理所有元素
+    // 处理所有元素(完成相应的 add)
     for (j = 0; j < elements; j++) {
-        score = scores[j];
+        score = scores[j];  // TODO:(DONE) 为什么要这样取一份出来？为了方便罢了，并不一定要的
 
         // 有序集合为 ziplist 编码
         if (zobj->encoding == REDIS_ENCODING_ZIPLIST) {
@@ -1893,6 +1912,7 @@ void zaddGenericCommand(redisClient *c, int incr) {
                 // 元素不存在，直接添加
                 zobj->ptr = zzlInsert(zobj->ptr,ele,score);
 
+                // zsetConvert() 的检查，没必要提前到 insert 前面，没用，因为跳不过去 zobj->encoding == REDIS_ENCODING_SKIPLIST 的 insert
                 // 查看元素的数量，
                 // 看是否需要将 ZIPLIST 编码转换为有序集合
                 if (zzlLength(zobj->ptr) > server.zset_max_ziplist_entries)
@@ -1944,6 +1964,10 @@ void zaddGenericCommand(redisClient *c, int incr) {
                 // 执行 ZINCRYBY 命令时，
                 // 或者用户通过 ZADD 修改成员的分值时执行
                 if (score != curscore) {
+                    // member 不变，所以 dict 可以不更新 member 部分
+                    // 但是 zsl 时必须全部更新的，因为 zsl 的新 node 是要更新所有 level 的
+                    // 所以只能连带 member 部分也一起更新掉（还不如直接重新 insert）
+
                     // 删除原有元素
                     redisAssertWithInfo(c,curobj,zslDelete(zs->zsl,curscore,curobj));
 
@@ -1981,6 +2005,7 @@ void zaddGenericCommand(redisClient *c, int incr) {
         addReplyLongLong(c,added);
 
 cleanup:
+    // 统一的回滚操作
     zfree(scores);
     if (added || updated) {
         signalModifiedKey(c->db,key);
@@ -1997,6 +2022,7 @@ void zincrbyCommand(redisClient *c) {
     zaddGenericCommand(c,1);
 }
 
+// ZREM key member [member ...]
 void zremCommand(redisClient *c) {
     robj *key = c->argv[1];
     robj *zobj;
@@ -2066,7 +2092,7 @@ void zremCommand(redisClient *c) {
         redisPanic("Unknown sorted set encoding");
     }
 
-    // 如果有至少一个元素被删除的话，那么执行以下代码
+    // 如果有至少一个元素被删除，则进行事件通知
     if (deleted) {
 
         notifyKeyspaceEvent(REDIS_NOTIFY_ZSET,"zrem",key,c->db->id);
@@ -2119,10 +2145,11 @@ void zremrangeGenericCommand(redisClient *c, int rangetype) {
 
     if (rangetype == ZRANGE_RANK) {
         /* Sanitize indexes. */
+        // 只有 ZRANGE_RANK 没进行 start-end 的 range 检查了，其他的都已经完成了检查的
         llen = zsetLength(zobj);
         if (start < 0) start = llen+start;
         if (end < 0) end = llen+end;
-        if (start < 0) start = 0;
+        if (start < 0) start = 0;   // start 的负数比 zsetLength 还大
 
         /* Invariant: start >= 0, so this test will be true when end < 0.
          * The range is empty when start > end or start >= length. */
@@ -2194,27 +2221,32 @@ cleanup:
     if (rangetype == ZRANGE_LEX) zslFreeLexRange(&lexrange);
 }
 
+// ZREMRANGEBYRANK key start stop
 void zremrangebyrankCommand(redisClient *c) {
     zremrangeGenericCommand(c,ZRANGE_RANK);
 }
 
+// ZREMRANGEBYSCORE key min max
 void zremrangebyscoreCommand(redisClient *c) {
     zremrangeGenericCommand(c,ZRANGE_SCORE);
 }
 
+// ZREMRANGEBYLEX key min max  新版里面已经被删掉了
 void zremrangebylexCommand(redisClient *c) {
     zremrangeGenericCommand(c,ZRANGE_LEX);
 }
 
 /*
- * 多态集合迭代器：可迭代集合或者有序集合
+ * 多态集合迭代器：可迭代 REDIS_SET 或者 REDIS_ZSET
  */
 typedef struct {
 
-    // 被迭代的对象
+    // subject、type、encoding 都是被迭代的那个 REDIS_SET\REDIS_ZSET subject 的基础信息
+    // 被迭代的对象（zset，可能是 ziplist or (zsl + dict)）
     robj *subject;
 
     // 对象的类型
+    // TODO: 这难道还能跟 set 混在一起用？score 怎么办？什么时候会用到 REDIS_SET？为什么要兼容 REDIS_SET？
     int type; /* Set, sorted set */
 
     // 编码
@@ -2270,12 +2302,12 @@ typedef struct {
 /* Use dirty flags for pointers that need to be cleaned up in the next
  * iteration over the zsetopval. 
  *
- * DIRTY 常量用于标识在下次迭代之前要进行清理。
+ * DIRTY 常量用于标识 zsetopval 在下次迭代之前要进行清理。
  *
  * The dirty flag for the long long value is special,
  * since long long values don't need cleanup. 
  *
- * 当 DIRTY 常量作用于 long long 值时，该值不需要被清理。
+ * 当 DIRTY 常量作用于 long long 值时，该值不需要被清理。(TODO: why?)
  *
  * Instead, it means that we already checked that "ell" holds a long long,
  * or tried to convert another representation into a long long value.
@@ -2287,13 +2319,14 @@ typedef struct {
  *
  * 当转换成功时， OPVAL_VALID_LL 被设置。
  */
+// TODO: 这个 opval-dirty 是用来干嘛的？
 #define OPVAL_DIRTY_ROBJ 1
 #define OPVAL_DIRTY_LL 2
 #define OPVAL_VALID_LL 4
 
 /* Store value retrieved from the iterator. 
  *
- * 用于保存从迭代器里取得的值的结构
+ * 用于保存从迭代器里取得的 value 的结构
  */
 typedef struct {
 
@@ -2302,10 +2335,15 @@ typedef struct {
     unsigned char _buf[32]; /* Private buffer. */
 
     // 可以用于保存 member 的几个类型
+    // dict 的时候，保存 key 这个 robj；
+    // skip-list 的时候，保存 zsl->node.obj 这个 member robj
     robj *ele;
+
+    // REDIS_ENCODING_ZIPLIST 用
     unsigned char *estr;
     unsigned int elen;
-    long long ell;
+
+    long long ell;  // intset 一定用这个，ziplist 可能用这个
 
     // 分值
     double score;
@@ -2317,7 +2355,8 @@ typedef union _iterset iterset;
 typedef union _iterzset iterzset;
 
 /*
- * 初始化迭代器
+ * 初始化迭代器（多态地初始化）
+ * 为这个 zset-operation-src-set 初始化一个迭代器，用来迭代这个待操作的 zset-operation-src-set
  */
 void zuiInitIterator(zsetopsrc *op) {
 
@@ -2382,6 +2421,7 @@ void zuiClearIterator(zsetopsrc *op) {
     if (op->subject == NULL)
         return;
 
+    // 只有 REDIS_ENCODING_HT 的情况下申请了内存，其他的都是采用指针的方式进行迭代
     if (op->type == REDIS_SET) {
 
         iterset *it = &op->iter.set;
@@ -2415,7 +2455,7 @@ void zuiClearIterator(zsetopsrc *op) {
 }
 
 /*
- * 返回正在被迭代的元素的长度
+ * 返回正在被迭代的 REDIS_SET\REDIS_ZSET 的长度
  */
 int zuiLength(zsetopsrc *op) {
 
@@ -2459,12 +2499,14 @@ int zuiLength(zsetopsrc *op) {
  *
  * 如果当前指向的元素不合法，那么说明对象已经迭代完毕，函数返回 0 。
  */
+// zsetopval *val 是本次迭代的返回结果
 int zuiNext(zsetopsrc *op, zsetopval *val) {
 
     if (op->subject == NULL)
         return 0;
 
     // 对上次的对象进行清理
+    // TODO: 这个 flag 是为了？哪里增加了引用计数？
     if (val->flags & OPVAL_DIRTY_ROBJ)
         decrRefCount(val->ele);
 
@@ -2481,6 +2523,7 @@ int zuiNext(zsetopsrc *op, zsetopval *val) {
             int64_t ell;
 
             // 取出成员
+            // 从 intset 中的 intset-index 位置取出 value 存放到 ell 里面去
             if (!intsetGet(it->is.is,it->is.ii,&ell))
                 return 0;
             val->ell = ell;
@@ -2493,7 +2536,7 @@ int zuiNext(zsetopsrc *op, zsetopval *val) {
         // 字典编码的集合
         } else if (op->encoding == REDIS_ENCODING_HT) {
 
-            // 已为空？
+            // 已为空？遍历到末尾了不？
             if (it->ht.de == NULL)
                 return 0;
 
@@ -2517,7 +2560,7 @@ int zuiNext(zsetopsrc *op, zsetopval *val) {
         if (op->encoding == REDIS_ENCODING_ZIPLIST) {
 
             /* No need to check both, but better be explicit. */
-            // 为空？
+            // 已为空？遍历到末尾了不？
             if (it->zl.eptr == NULL || it->zl.sptr == NULL)
                 return 0;
 
@@ -2646,6 +2689,7 @@ int zuiBufferFromValue(zsetopval *val) {
  *
  * 找到返回 1 ，否则返回 0 。
  */
+// 实际上查找的标的是 member
 int zuiFind(zsetopsrc *op, zsetopval *val, double *score) {
 
     if (op->subject == NULL)
@@ -2729,6 +2773,8 @@ int zuiCompareByCardinality(const void *s1, const void *s2) {
 
 /*
  * 根据 aggregate 参数的值，决定如何对 *target 和 val 进行聚合计算。
+ * target 是 dest REDIS_ZSET 中，某一个 entry 的最终 score，（同时，本函数的运算结果也会放在这里）
+ * val 则是其他集合里面，match 了同一个 member 的 score（叠上了 weight 之后）
  */
 inline static void zunionInterAggregate(double *target, double val, int aggregate) {
 
@@ -2755,10 +2801,11 @@ inline static void zunionInterAggregate(double *target, double val, int aggregat
     }
 }
 
+// dstkey 原本要是存在的话，将会被直接删除掉
 void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
     int i, j;
     long setnum;
-    int aggregate = REDIS_AGGR_SUM;
+    int aggregate = REDIS_AGGR_SUM; // 默认参数
     zsetopsrc *src;
     zsetopval zval;
     robj *tmp;
@@ -2769,7 +2816,7 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
     int touched = 0;
 
     /* expect setnum input keys to be given */
-    // 取出要处理的有序集合的个数 setnum
+    // 取出要处理的有序集合的个数 setnum（numkeys）
     if ((getLongFromObjectOrReply(c, c->argv[2], &setnum, NULL) != REDIS_OK))
         return;
 
@@ -2787,21 +2834,24 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
     }
 
     /* read keys to be used for input */
-    // 为每个输入 key 创建一个迭代器
+    // 为每一个 key（sorted_set） 创建一个迭代器
     src = zcalloc(sizeof(zsetopsrc) * setnum);
     for (i = 0, j = 3; i < setnum; i++, j++) {
 
         // 取出 key 对象
         robj *obj = lookupKeyWrite(c->db,c->argv[j]);
 
-        // 创建迭代器
+        // 初始化每一个 sorted_set 的迭代器
         if (obj != NULL) {
+            // 这个 CMD 是同时兼容 REDIS_SET、REDIS_ZSET 同时混合使用的
+            // REDIS_SET 的 score 将会被自动填写为 1.0
             if (obj->type != REDIS_ZSET && obj->type != REDIS_SET) {
                 zfree(src);
                 addReply(c,shared.wrongtypeerr);
                 return;
             }
 
+            // 简单初始化 subject 的信息
             src[i].subject = obj;
             src[i].type = obj->type;
             src[i].encoding = obj->encoding;
@@ -2819,12 +2869,13 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
     /* parse optional extra arguments */
     // 分析并读入可选参数
     if (j < c->argc) {
-        int remaining = c->argc - j;
+        int remaining = c->argc - j;    // 还有多少个参数要进行读取
 
-        while (remaining) {
+        while (remaining) { // 只要后面还有参数可以读取
             if (remaining >= (setnum + 1) && !strcasecmp(c->argv[j]->ptr,"weights")) {
+                // 这个 if 分支只会进来一次，因为下面有一个 for-loop 了
                 j++; remaining--;
-                // 权重参数
+                // 调整每一个 REDIS_SET\REDIS_ZSET 对应迭代器里的 weight 参数
                 for (i = 0; i < setnum; i++, j++, remaining--) {
                     if (getDoubleFromObjectOrReply(c,c->argv[j],&src[i].weight,
                             "weight value is not a float") != REDIS_OK)
@@ -2835,6 +2886,7 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
                 }
 
             } else if (remaining >= 2 && !strcasecmp(c->argv[j]->ptr,"aggregate")) {
+                // 同样也是会只进入这个分支一次（sum\min\max 只能三选一）
                 j++; remaining--;
                 // 聚合方式
                 if (!strcasecmp(c->argv[j]->ptr,"sum")) {
@@ -2851,6 +2903,7 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
                 j++; remaining--;
 
             } else {
+                // 语法错误，CMD 书写得有问题，有多余的参数
                 zfree(src);
                 addReply(c,shared.syntaxerr);
                 return;
@@ -2860,7 +2913,7 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
 
     /* sort sets from the smallest to largest, this will improve our
      * algorithm's performance */
-    // 对所有集合进行排序，以减少算法的常数项
+    // 对所有集合进行排序，以减少算法的常数项（根据每一个 zsetopsrc 里面的 node 个数来进行排列）
     qsort(src,setnum,sizeof(zsetopsrc),zuiCompareByCardinality);
 
     // 创建结果集对象
@@ -2872,17 +2925,17 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
     if (op == REDIS_OP_INTER) {
 
         /* Skip everything if the smallest input is empty. */
-        // 只处理非空集合
+        // 只处理非空集合（只要存在一个 NULL 的集合，那结果必然是空集合，所以可以不用进行任何计算）
         if (zuiLength(&src[0]) > 0) {
 
             /* Precondition: as src[0] is non-empty and the inputs are ordered
              * by size, all src[i > 0] are non-empty too. */
             // 遍历基数最小的 src[0] 集合
             zuiInitIterator(&src[0]);
-            while (zuiNext(&src[0],&zval)) {
-                double score, value;
+            while (zuiNext(&src[0],&zval)) {    // 从最小的那个集合中，遍历一次其他全部集合
+                double score, value;    // 这两个都是 score，score 是 src[0] 中 member 的 score，value 是 src[j] 中 member 的 score
 
-                // 计算加权分值
+                // 计算 src[0] 中，当前 member 加权后分值 score
                 score = src[0].weight * zval.score;
                 if (isnan(score)) score = 0;
 
@@ -2897,26 +2950,27 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
                     // 这种情况在某个 key 输入了两次，
                     // 并且这个 key 是所有输入集合中基数最小的集合时会出现
                     if (src[j].subject == src[0].subject) {
+                        // 同一个 REDIS_ZSET 的话
                         value = zval.score*src[j].weight;
-                        zunionInterAggregate(&score,value,aggregate);
+                        zunionInterAggregate(&score,value,aggregate);   // 将本次计算结果放在 score 里面
 
                     // 如果能在其他集合找到当前迭代到的元素的话
                     // 那么进行聚合计算
-                    } else if (zuiFind(&src[j],&zval,&value)) {
-                        value *= src[j].weight;
-                        zunionInterAggregate(&score,value,aggregate);
+                    } else if (zuiFind(&src[j],&zval,&value)) { // 这里会填充 value（即 src[j] 中，跟 src[0] match 的那个 member 的 score）
+                        value *= src[j].weight; // 叠加上 weight
+                        zunionInterAggregate(&score,value,aggregate);   // 将本次计算结果放在 score 里面
 
                     // 如果当前元素没出现在某个集合，那么跳出 for 循环
                     // 处理下个元素
                     } else {
                         break;
                     }
-                }
+                }   // end of for-loop
 
                 /* Only continue when present in every input. */
                 // 只在交集元素出现时，才执行以下代码
                 if (j == setnum) {
-                    // 取出值对象
+                    // 取出 member 对象
                     tmp = zuiObjectFromValue(&zval);
                     // 加入到有序集合中
                     znode = zslInsert(dstzset->zsl,score,tmp);
@@ -2925,13 +2979,13 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
                     dictAdd(dstzset->dict,tmp,&znode->score);
                     incrRefCount(tmp); /* added to dictionary */
 
-                    // 更新字符串对象的最大长度
+                    // 更新字符串对象的最大长度(将会影响后面要不要采用压缩度更高的 ZIPLIST 编码方式实现 REDIS_ZSET)
                     if (sdsEncodedObject(tmp)) {
                         if (sdslen(tmp->ptr) > maxelelen)
                             maxelelen = sdslen(tmp->ptr);
                     }
                 }
-            }
+            }   // end of while-loop
             zuiClearIterator(&src[0]);
         }
 
@@ -2951,7 +3005,7 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
                 double score, value;
 
                 /* Skip an element that when already processed */
-                // 跳过已处理元素
+                // 跳过已处理元素(因为并集是不得不，将每一个 zset 中的每一个 member 都检查一次的)
                 if (dictFind(dstzset->dict,zuiObjectFromValue(&zval)) != NULL)
                     continue;
 
@@ -2965,7 +3019,7 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
                  * exists, since we process every element just one time so
                  * it can't exist in a previous set (otherwise it would be
                  * already processed). */
-                for (j = (i+1); j < setnum; j++) {
+                for (j = (i+1); j < setnum; j++) {  // j = (i+1)，前面几个 set 不用再检查了，已经检查过了
                     /* It is not safe to access the zset we are
                      * iterating, so explicitly check for equal object. */
                     // 当前元素的集合和被迭代集合一样
@@ -3015,6 +3069,7 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
     if (dstzset->zsl->length) {
         /* Convert to ziplist when in limits. */
         // 看是否需要对结果集合进行编码转换
+        // TODO:(DONE) 为什么这次优先使用 zsl + dict 的方案呢？改修快呀，上面一堆 insert、remove 操作，到了最后才看看要不要压缩操作
         if (dstzset->zsl->length <= server.zset_max_ziplist_entries &&
             maxelelen <= server.zset_max_ziplist_value)
                 zsetConvert(dstobj,REDIS_ENCODING_ZIPLIST);
@@ -3047,10 +3102,49 @@ void zunionInterGenericCommand(redisClient *c, robj *dstkey, int op) {
     zfree(src);
 }
 
+// ZUNIONSTORE destination numkeys key [key ...] [WEIGHTS weight] [AGGREGATE SUM|MIN|MAX]
+// numkeys 指定有多少个 key 参与
+// WEIGHTS 指明乘法因子，有几个 key，就要指定多少个 weight，顺序跟 key 一致；如果没有指定 WEIGHTS 选项，乘法因子默认设置为 1 。
+// AGGREGATE 不同的 sorted_set 有同一个 member，那么这个 member 在 destination sorted_set 的 score 怎么取？和？最小值？最大值？
+// AGGREGATE 默认使用的参数 SUM 
+
+// TODO: 无法理解，这两个 CMD 竟然是能够混合使用 REDIS_ZSET 跟 REDIS_SET 类型的 key。这种设计的目的是什么？
+/**
+ * 127.0.0.1:6379> SADD s1 m1 m2 m3 m4 m5 m6
+ * (integer) 6
+ * 127.0.0.1:6379> SADD s2 m1 m2 m3 m4 m5 m6
+ * (integer) 6
+ * 127.0.0.1:6379> SADD s3 m5 m6 m7 m8 m9 m10
+ * (integer) 6
+ * 127.0.0.1:6379> ZUNIONSTORE dest 3 s1 s2 s3 
+ * 127.0.0.1:6379> ZRANGE dest 0 -1 WITHSCORES
+ *  1) "m10"
+ *  2) "1"
+ *  3) "m7"
+ *  4) "1"
+ *  5) "m8"
+ *  6) "1"
+ *  7) "m9"
+ *  8) "1"
+ *  9) "m1"
+ * 10) "2"
+ * 11) "m2"
+ * 12) "2"
+ * 13) "m3"
+ * 14) "2"
+ * 15) "m4"
+ * 16) "2"
+ * 17) "m5"
+ * 18) "3"
+ * 19) "m6"
+ * 20) "3"
+ * 127.0.0.1:6379> 
+*/
 void zunionstoreCommand(redisClient *c) {
     zunionInterGenericCommand(c,c->argv[1], REDIS_OP_UNION);
 }
 
+// ZINTERSTORE destination numkeys key [key ...] [WEIGHTS weight] [AGGREGATE SUM|MIN|MAX]
 void zinterstoreCommand(redisClient *c) {
     zunionInterGenericCommand(c,c->argv[1], REDIS_OP_INTER);
 }
@@ -3107,7 +3201,7 @@ void zrangeGenericCommand(redisClient *c, int reverse) {
         unsigned int vlen;
         long long vlong;
 
-        // 决定迭代的方向
+        // 决定迭代的方向(ZIPLIST encoding 下，score、member 是成对保存的)
         if (reverse)
             eptr = ziplistIndex(zl,-2-(2*start));
         else
@@ -3166,10 +3260,15 @@ void zrangeGenericCommand(redisClient *c, int reverse) {
     }
 }
 
+// ZRANGE key start stop [WITHSCORES]
+// 其中成员的位置(stop\start)按 score 值递增(从小到大)来排序。
+//  ZRANGE salary 0 -1 WITHSCORES             # 显示整个有序集成员
 void zrangeCommand(redisClient *c) {
     zrangeGenericCommand(c,0);
 }
 
+// ZREVRANGE key start stop [WITHSCORES]
+// 成员的位置（stop\start）按 score 值递减(从大到小)来排列。
 void zrevrangeCommand(redisClient *c) {
     zrangeGenericCommand(c,1);
 }
@@ -3236,7 +3335,7 @@ void genericZrangebyscoreCommand(redisClient *c, int reverse) {
         double score;
 
         /* If reversed, get the last node in range as starting point. */
-        // 迭代的方向
+        // 迭代的方向(取得 range 范围内的最后一个\第一个元素)
         if (reverse) {
             eptr = zzlLastInRange(zl,&range);
         } else {
@@ -3261,7 +3360,7 @@ void genericZrangebyscoreCommand(redisClient *c, int reverse) {
 
         /* If there is an offset, just traverse the number of elements without
          * checking the score because that is done in the next loop. */
-        // 跳过 offset 指定数量的元素
+        // 跳过 offset 指定数量的元素(仅仅做出指针移动，然是不进行数值输出)
         while (eptr && offset--) {
             if (reverse) {
                 zzlPrev(zl,&eptr,&sptr);
@@ -3376,14 +3475,20 @@ void genericZrangebyscoreCommand(redisClient *c, int reverse) {
     setDeferredMultiBulkLength(c, replylen, rangelen);
 }
 
+// ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]
+// 返回有序集 key 中，所有 score 值介于 min 和 max 之间(包括等于 min 或 max )的成员。有序集成员按 score 值递增(从小到大)次序排列。
 void zrangebyscoreCommand(redisClient *c) {
     genericZrangebyscoreCommand(c,0);
 }
 
+// ZREVRANGEBYSCORE key max min [WITHSCORES] [LIMIT offset count]
+// 返回有序集 key 中， score 值介于 max 和 min 之间(默认包括等于 max 或 min )的所有的成员。有序集成员按 score 值递减(从大到小)的次序排列。
 void zrevrangebyscoreCommand(redisClient *c) {
     genericZrangebyscoreCommand(c,1);
 }
 
+// ZCOUNT key min max
+// 返回有序集 key 中，score 值在 min 和 max 之间(默认包括 score 值等于 min 或 max )的成员的数量。
 void zcountCommand(redisClient *c) {
     robj *key = c->argv[1];
     robj *zobj;
@@ -3456,7 +3561,7 @@ void zcountCommand(redisClient *c) {
         /* Use rank of first element, if any, to determine preliminary count */
         // 如果有至少一个元素在范围内，那么执行以下代码
         if (zn != NULL) {
-            // 确定范围内第一个元素的排位
+            // 确定范围内第一个元素的排位（利用跳表的特性快速搜索）
             rank = zslGetRank(zsl, zn->score, zn->obj);
 
             count = (zsl->length - (rank - 1));
@@ -3468,7 +3573,7 @@ void zcountCommand(redisClient *c) {
             /* Use rank of last element, if any, to determine the actual count */
             // 如果范围内的最后一个元素不为空，那么执行以下代码
             if (zn != NULL) {
-                // 确定范围内最后一个元素的排位
+                // 确定范围内最后一个元素的排位（利用跳表的特性快速搜索）
                 rank = zslGetRank(zsl, zn->score, zn->obj);
 
                 // 这里计算的就是第一个和最后一个两个元素之间的元素数量
@@ -3748,6 +3853,7 @@ void zrevrangebylexCommand(redisClient *c) {
     genericZrangebylexCommand(c,1);
 }
 
+// ZCARD key
 void zcardCommand(redisClient *c) {
     robj *key = c->argv[1];
     robj *zobj;
@@ -3760,6 +3866,7 @@ void zcardCommand(redisClient *c) {
     addReplyLongLong(c,zsetLength(zobj));
 }
 
+// ZSCORE key member
 void zscoreCommand(redisClient *c) {
     robj *key = c->argv[1];
     robj *zobj;
@@ -3797,6 +3904,7 @@ void zscoreCommand(redisClient *c) {
     }
 }
 
+//  获得某一个 member 的 rank
 void zrankGenericCommand(redisClient *c, int reverse) {
     robj *key = c->argv[1];
     robj *ele = c->argv[2];
@@ -3822,7 +3930,7 @@ void zrankGenericCommand(redisClient *c, int reverse) {
         sptr = ziplistNext(zl,eptr);
         redisAssertWithInfo(c,zobj,sptr != NULL);
 
-        // 计算排名
+        // 计算某一个 member 排名
         rank = 1;
         while(eptr != NULL) {
             if (ziplistCompare(eptr,ele->ptr,sdslen(ele->ptr)))
@@ -3873,10 +3981,15 @@ void zrankGenericCommand(redisClient *c, int reverse) {
     }
 }
 
+// ZRANK key member
+// 返回有序集 key 中成员 member 的排名。其中有序集成员按 score 值递增(从小到大)顺序排列。
+// 排名以 0 为底，也就是说， score 值最小的成员排名为 0 。
 void zrankCommand(redisClient *c) {
     zrankGenericCommand(c, 0);
 }
 
+// ZREVRANGE key start stop [WITHSCORES]
+// 其中成员的位置按 score 值递减(从大到小)来排列。
 void zrevrankCommand(redisClient *c) {
     zrankGenericCommand(c, 1);
 }

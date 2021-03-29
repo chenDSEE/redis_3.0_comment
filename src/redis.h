@@ -182,6 +182,7 @@
 
 /* Object types */
 // 对象类型
+// zset 是一种很特别的类型，因为 zset 同时使用了两种底层数据结构进行构建（skip-list + ）
 #define REDIS_STRING 0
 #define REDIS_LIST 1
 #define REDIS_SET 2
@@ -200,7 +201,7 @@
 #define REDIS_ENCODING_ZIPMAP 3     /* Encoded as zipmap */
 #define REDIS_ENCODING_LINKEDLIST 4 /* Encoded as regular linked list */
 
-// 采用 REDIS_ENCODING_ZIPLIST 方式编码的 REDIS_HT，会将 field、value 顺序的 push-tail 进 ziplist 中
+// 采用 REDIS_ENCODING_ZIPLIST 方式编码的 REDIS_HT，REDIS_ZSET，会将 field\score、value\member 顺序的 push-tail 进 ziplist 中
 #define REDIS_ENCODING_ZIPLIST 5    /* Encoded as ziplist */
 #define REDIS_ENCODING_INTSET 6     /* Encoded as intset */
 #define REDIS_ENCODING_SKIPLIST 7   /* Encoded as skiplist */
@@ -827,9 +828,11 @@ typedef struct zskiplist {
 
 /*
  * 有序集合
- * zset 是必须同时采用 dict + skiplist 来进行数据结构化管理
+ * zset 是同时采用 dict + skiplist 来进行数据结构化管理
  * 而不是 zset 可以采用 skip list 或 dict 这种两底层 encoding 方式进行编码
  * struct zset 下面是同时管着一个 dict 跟 zsl 的
+ * 这种情况下，score 既会保存在 zsl-node 里面，又会保存在 dict 里面（member 作为 key，score 作为 value）
+ * 同样，member 的指针，在 zsl-node、dict-node 里面都会保存一份（访问起来更快）
  * 
  *    redis_obj           
  * +------------+         zset
@@ -838,6 +841,16 @@ typedef struct zskiplist {
  *                     +---------+
  *                     |  *zsl   | ------> 
  *                     +---------+
+ * 
+ * 还有另一种情况就是，zset 整体 node 少，将会采用 ziplist 来进行管理，每一个 node 都会保存 (member, score) pair
+ * 
+ *    redis_obj         
+ * +------------+      +----------+----------+---------+------------------+---------+
+ * |  robj.ptr  | ---> | zlbytes  |  zltail  |  zllen  |  ... entrys ...  |  zlend  |
+ * +------------+      +----------+----------+---------+------------------+---------+
+ *                     ^
+ *                     |
+ *             unsigned char *ziplist
  */
 typedef struct zset {
 

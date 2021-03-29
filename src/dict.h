@@ -87,6 +87,14 @@ typedef struct dictEntry {
  * struct dictType 存在的意义？
  * 因为 REDIS_SET\REDIS_HASH 都会用到 ENCODING_HT 的编码方式，但是 REDIS_SET 只会使用 key 而不使用 value
  * 为了能够实现多态，或者说 模板方法（dictSetKey() 这个宏，作为模板方法） 来统一创建、销毁、复制的 api 函数，所以采用 callback 的方案，在创建的时候就指定好
+ * 
+ * dict 的使用范围十分广泛，无论是数据库的内部实现，还是 redis 的分片机制等等，都需要使用到 dict。
+ * 不同的使用方法，将会造成 dict 对于不同使用方法下的 key、value 有者不同的管理方式
+ * 这时候，就是通过设置不同的 dictType，进而使用不同的 callback 来实现的
+ * 
+ * 泛型：
+ * 这样的 dict，你理解为 C++ 中的 STL 容器更为适合，在执行不同的类型操作时，需要自己手动提供相应的谓词
+ * 而这里面的 callback 就是谓词
  */
 // 相应 callback 请参考 redis.c
 typedef struct dictType {
