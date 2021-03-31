@@ -498,16 +498,22 @@ struct evictionPoolEntry {
 /* Redis database representation. There are multiple databases identified
  * by integers from 0 (the default database) up to the max configured
  * database. The database number is the 'id' field in the structure. */
+// NOTE: redis 的过期策略都是针对一个 key 来进行设置的，一旦这个 key 过期，这个 key 所关联的 value（ZSET、SET、HASH 整体就会被删除）
 typedef struct redisDb {
 
     // 数据库键空间，保存着数据库中的所有键值对
+    // key 是用户日后 CMD 输入的 key，value 则是底层组织方式（由用户的 set\zadd\hset 之类的决定采用什么数据组织结构）
+    // key 将会是一个没有预留任何空间的 sds（统一的，因为 key 的经常查询，就没有必要压缩解压了），而不是一个 robj
     dict *dict;                 /* The keyspace for this DB */
 
     // 键的过期时间，字典的键为键，字典的值为过期事件 UNIX 时间戳
+    // 参考 dbRandomKey()
+    // 这个 dict 负责记录这个 DB 里面所有设置了 expire-timeout 的 key；
+    // value 则是填写了这个 key 相应的过期时间
     dict *expires;              /* Timeout of keys with a timeout set */
 
     // 正处于阻塞状态的键
-    // key -> value: string -> list
+    // key -> value <===> string -> list
     // 具体被阻塞的 key -> 阻塞在这个 key 上面的 client，以及阻塞的顺序
     dict *blocking_keys;        /* Keys with clients waiting for data (BLPOP) */
 
@@ -515,7 +521,7 @@ typedef struct redisDb {
     // 用来去重
     dict *ready_keys;           /* Blocked keys that received a PUSH */
 
-    // 正在被 WATCH 命令监视的键
+    // 正在被 WATCH 命令监视的键(TODO: 结合 multi.c 来看)
     dict *watched_keys;         /* WATCHED keys for MULTI/EXEC CAS */
 
     struct evictionPoolEntry *eviction_pool;    /* Eviction pool of keys */

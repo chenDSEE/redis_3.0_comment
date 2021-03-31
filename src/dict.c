@@ -1385,8 +1385,12 @@ static unsigned long rev(unsigned long v) {
  *    comment is supposed to help.
  *    对游标进行翻转（reverse）的原因初看上去比较难以理解，
  *    不过阅读这份注释应该会有所帮助。
+ * 
+ * 这个算法的核心目的是：保证所有 entry 都会被遍历到，但是不保证每一个 entry 都只会返回一次
+ * rehash 的时候，直接让 游标 的覆盖范围更大
  */
 // TODO: 好家伙，没看懂，结合实例来看吧
+// 参考 scanGenericCommand() 函数
 unsigned long dictScan(dict *d,
                        unsigned long v,
                        dictScanFunction *fn,
@@ -1413,7 +1417,7 @@ unsigned long dictScan(dict *d,
         de = t0->table[v & m0];
         // 遍历桶中的所有节点
         while (de) {
-            fn(privdata, de);
+            fn(privdata, de);   // 将结果保存到 list 里面，准备返回给 client
             de = de->next;
         }
 

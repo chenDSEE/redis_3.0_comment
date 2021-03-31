@@ -41,6 +41,7 @@
 #include "util.h"
 
 /* Glob-style pattern matching. */
+// 检查当前 string 是否符合 pattern
 int stringmatchlen(const char *pattern, int patternLen,
         const char *string, int stringLen, int nocase)
 {

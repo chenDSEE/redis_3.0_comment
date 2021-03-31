@@ -62,10 +62,19 @@
  * 哈希表节点
  * entry 的管理信息，实际数据部分通常采用指针（u64\s64 除外）
  */
+/**
+ * struct dictEntry:
+ * +-------------+---------------+---------+
+ * |  void *key  |  void *value  |  *next  |---->
+ * +-------------+---------------+---------+
+ *        ^              ^
+ *        |              |
+ *       sds           robj
+*/
 typedef struct dictEntry {
     
     // 键
-    void *key;  // 仅仅是指向某一个 robj，也没有必要知晓这个 robj 的大小、编码方式、引用计数
+    void *key;  // 仅仅是指向某一个 robj（甚至会是一个 sds，而不是 robj，毕竟 key 嘛），也没有必要知晓这个 robj 的大小、编码方式、引用计数
 
     // 值
     union {

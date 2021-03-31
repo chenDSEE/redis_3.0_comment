@@ -58,12 +58,12 @@ robj *lookupKey(redisDb *db, robj *key) {
         // 取出值
         robj *val = dictGetVal(de);
 
-        /* Update the access time for the ageing algorithm.
+        /* Update the access time for the ageing algorithm(老化算法).
          * Don't do it if we have a saving child, as this will trigger
          * a copy on write madness. */
         // 更新时间信息（只在不存在子进程时执行，防止破坏 copy-on-write 机制）
         if (server.rdb_child_pid == -1 && server.aof_child_pid == -1)
-            val->lru = LRU_CLOCK();
+            val->lru = LRU_CLOCK(); // TODO: 为什么是更新 value 的 LRU，而不是 key 的 LRU？
 
         // 返回值
         return val;
@@ -75,8 +75,9 @@ robj *lookupKey(redisDb *db, robj *key) {
     }
 }
 
+// 因为 C 语言的 const 支持并不完善，只能够手动分开 read\write
 /*
- * 为执行读取操作而取出键 key 在数据库 db 中的值。
+ * 为执行 读取操作 而取出键 key 在数据库 db 中的 value-robj(REDIS_ZSET\HASH\SET 之类的)。
  *
  * 并根据是否成功找到值，更新服务器的命中/不命中信息。
  * TODO: 服务器的命中/不命中信息 是用来干什么的？
@@ -108,11 +109,13 @@ robj *lookupKeyRead(redisDb *db, robj *key) {
  *
  * 找到时返回值对象，没找到返回 NULL 。
  */
-// 本函数的底层可能会触发 rehash
+// 本函数的底层可能会触发 rehash，注意，是针对 DB 的 key-dict 进行 rehash，而不是针对 某一个 key 下面的 dict 进行 rehash
 robj *lookupKeyWrite(redisDb *db, robj *key) {
 
     // 删除过期键
-    // TODO: 为什么？过期的 key 不会自动删除的吗？惰性删除？避免满天飞的 timer ？
+    // TODO:(DONE) 为什么？过期的 key 不会自动删除的吗？惰性删除？避免满天飞的 timer ？
+    // 惰性删除, 避免满天飞的 timer
+    // 注意区分 LRU 跟 过期，这是不同的两码事
     expireIfNeeded(db,key);
 
     // 查找并返回 key 的值对象
@@ -161,10 +164,13 @@ robj *lookupKeyWriteOrReply(redisClient *c, robj *key, robj *reply) {
  *
  * 调用者负责对 key 和 val 的引用计数进行增加。
  *
- * The program is aborted if the key already exists. 
+ * The program is aborted if the key already exists. （key 不存在于这个 DB 中，应该由上层调用者来保证）
  *
  * 程序在键已经存在时会停止。
  */
+// hset global-key field-name value-string (key 是一个 REDIS_STRING，value 是一个 REDIS_HAHS)
+// p *key; $1 = {type = 0(REDIS_STRING), encoding = 8, lru = 6398167, refcount = 1, ptr = 0x7fc992413658}
+// p *val; $2 = {type = 4(REDIS_HASH), encoding = 5, lru = 6398167, refcount = 1, ptr = 0x7fc992486230}
 void dbAdd(redisDb *db, robj *key, robj *val) {
 
     // 复制键名
@@ -272,7 +278,7 @@ robj *dbRandomKey(redisDb *db) {
 
         // 取出键
         key = dictGetKey(de);
-        // 为键创建一个字符串对象，对象的值为键的名字
+        // 为键创建一个字符串对象
         keyobj = createStringObject(key,sdslen(key));
         // 检查键是否带有过期时间
         if (dictFind(db->expires,key)) {
@@ -298,7 +304,7 @@ int dbDelete(redisDb *db, robj *key) {
 
     /* Deleting an entry from the expires dict will not free the sds of
      * the key, because it is shared with the main dictionary. */
-    // 删除键的过期时间
+    // 删除键的过期时间（有的话）
     if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
 
     // 删除键值对
@@ -319,7 +325,7 @@ int dbDelete(redisDb *db, robj *key) {
  * are true:
  *
  * 1) The object 'o' is shared (refcount > 1), we don't want to affect
- *    other users.
+ *    other users.（COW 的手法）
  * 2) The object encoding is not "RAW".
  *
  * If the object is found in one of the above conditions (or both) by the
@@ -339,6 +345,9 @@ int dbDelete(redisDb *db, robj *key) {
  * At this point the caller is ready to modify the object, for example
  * using an sdscat() call to append some data, or anything else.
  */
+// 比起提供一个 object 等级的 copy 函数，还不如就这样先解码，在创建新的 obj 来的更快
+// 1. 并不是所有东西都可以进行压缩编码的，只有 REDIS_STRING，其他都是包含很多个 node\entry 的 robj，不可能压缩的，也不可能单独一个 node\entry 使用
+// 2. 你真要提供一个 object 的 copy 也不是不行，但里面会有一堆的 if-else，手动实现多态的 copy 模板方法
 robj *dbUnshareStringValue(redisDb *db, robj *key, robj *o) {
     redisAssert(o->type == REDIS_STRING);
     if (o->refcount != 1 || o->encoding != REDIS_ENCODING_RAW) {
@@ -394,7 +403,7 @@ int selectDb(redisClient *c, int id) {
 /*-----------------------------------------------------------------------------
  * Hooks for key space changes.
  *
- * 键空间改动的钩子。
+ * 键空间改动的钩子。（需要自己手动埋进每一个可能需要触发的地方）
  *
  * Every time a key in the database is modified the function
  * signalModifiedKey() is called.
@@ -421,7 +430,7 @@ void signalFlushedDb(int dbid) {
  *----------------------------------------------------------------------------*/
 
 /*
- * 清空客户端指定的数据库
+ * 清空客户端当前的数据库
  */
 void flushdbCommand(redisClient *c) {
 
@@ -445,7 +454,7 @@ void flushdbCommand(redisClient *c) {
  */
 void flushallCommand(redisClient *c) {
 
-    // 发送通知
+    // 发送通知（TODO: 通知什么？通知谁？怎么通知？信号？scoket？）
     signalFlushedDb(-1);
 
     // 清空所有数据库
@@ -518,6 +527,8 @@ void existsCommand(redisClient *c) {
     }
 }
 
+// SELECT index
+// 默认使用 0 号数据库。
 void selectCommand(redisClient *c) {
     long id;
 
@@ -527,6 +538,7 @@ void selectCommand(redisClient *c) {
         return;
 
     if (server.cluster_enabled && id != 0) {
+        // TODO: 为什么切片模式下不允许多 DB ？
         addReplyError(c,"SELECT is not allowed in cluster mode");
         return;
     }
@@ -552,6 +564,19 @@ void randomkeyCommand(redisClient *c) {
     decrRefCount(key);
 }
 
+// KEYS pattern
+// 根据你给出的 pattern，将会决定你这个 CLI 阻塞占用 redis-server 多久，
+// 这是一个 while-loop 等级的遍历，会一次性返回所有结果（可匹配的结果越多，while-loop 运行时间越长）
+
+// KEYS * 匹配数据库中所有 key 。
+// KEYS h?llo 匹配 hello ， hallo 和 hxllo 等。
+// KEYS h*llo 匹配 hllo 和 heeeeello 等。
+// KEYS h[ae]llo 匹配 hello 和 hallo ，但不匹配 hillo 。
+// 特殊符号用 \ 隔开
+
+// KEYS 的速度非常快，但在一个大的数据库中使用它仍然可能造成性能问题，
+// 如果你需要从一个数据集中查找特定的 key ，你最好还是用 Redis 的集合结构(set)来代替。
+// 因为 db->dict 还要同步 db->expires, expireIfNeeded() 等一系列操作，自然会比 set 更慢
 void keysCommand(redisClient *c) {
     dictIterator *di;
     dictEntry *de;
@@ -649,7 +674,7 @@ int parseScanCursorOrReply(redisClient *c, robj *o, unsigned long *cursor) {
  * the current database.
  *
  * 如果给定了对象 o ，那么它必须是一个哈希对象或者集合对象，
- * 如果 o 为 NULL 的话，函数将使用当前数据库作为迭代对象。
+ * 如果 o 为 NULL 的话，函数将使用当前数据库（DB->dict）作为迭代对象。
  *
  * When 'o' is not NULL the function assumes that the first argument in
  * the client arguments vector is a key so it skips it before iterating
@@ -667,7 +692,7 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
     int rv;
     int i, j;
     char buf[REDIS_LONGSTR_SIZE];
-    list *keys = listCreate();
+    list *keys = listCreate();  // 遍历出来的结果保存在这里，当 SCAN 的是 REDIS_HASH\ZSET 就需要两个连续的 node 来存储一个 entry 中的 key + value
     listNode *node, *nextnode;
     long count = 10;
     sds pat;
@@ -676,15 +701,15 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
 
     /* Object must be NULL (to iterate keys names), or the type of the object
      * must be Set, Sorted Set, or Hash. */
-    // 输入类型检查
+    // 输入类型检查（只有下面的四种情况才能够被接受）
     redisAssert(o == NULL || o->type == REDIS_SET || o->type == REDIS_HASH ||
                 o->type == REDIS_ZSET);
 
     /* Set i to the first option argument. The previous one is the cursor. */
     // 设置第一个选项参数的索引位置
-    // 0    1      2      3  
-    // SCAN OPTION <op_arg>         SCAN 命令的选项值从索引 2 开始
-    // HSCAN <key> OPTION <op_arg>  而其他 *SCAN 命令的选项值从索引 3 开始
+    // 0     1       2        3  
+    // SCAN  cursor  <op_arg>         SCAN 命令的选项值从索引 2 开始
+    // HSCAN <key>   cursor   <op_arg>  而其他 *SCAN 命令的选项值从索引 3 开始
     i = (o == NULL) ? 2 : 3; /* Skip the key argument if needed. */
 
     /* Step 1: Parse options. */
@@ -755,7 +780,7 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
         zset *zs = o->ptr;
         ht = zs->dict;
         count *= 2; /* We return key / value for this type. */
-    }
+    }   // TODO:(DONE) ZIPLIST 呢？下面 ht == NULL 的分支将分别处理 ZIPLIST、INTSET 这两种情况
 
     if (ht) {
         void *privdata[2];
@@ -768,11 +793,11 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
         // 另一个是字典对象
         // 从而实现类型无关的数据提取操作
         privdata[0] = keys;
-        privdata[1] = o;
+        privdata[1] = o;    // DB->dict 的情况下，是 NULL
         do {
             cursor = dictScan(ht, cursor, scanCallback, privdata);
         } while (cursor && listLength(keys) < count);
-    } else if (o->type == REDIS_SET) {
+    } else if (o->type == REDIS_SET) {  // 等价于 o->type == REDIS_SET && o->encoding == INTSET
         int pos = 0;
         int64_t ll;
 
@@ -780,6 +805,7 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
             listAddNodeTail(keys,createStringObjectFromLongLong(ll));
         cursor = 0;
     } else if (o->type == REDIS_HASH || o->type == REDIS_ZSET) {
+        // 底层 encoding 采用 ZIPLIST 编码方式
         unsigned char *p = ziplistIndex(o->ptr,0);
         unsigned char *vstr;
         unsigned int vlen;
@@ -802,7 +828,7 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
     while (node) {
         robj *kobj = listNodeValue(node);
         nextnode = listNextNode(node);
-        int filter = 0;
+        int filter = 0; // 每次 while-loop 都会被 reset，filter = 1 就意味着不符合 pattern，要剔除掉
 
         /* Filter element if it does not match the pattern. */
         if (!filter && use_pattern) {
@@ -820,6 +846,7 @@ void scanGenericCommand(redisClient *c, robj *o, unsigned long cursor) {
         }
 
         /* Filter element if it is an expired key. */
+        // 过期的 key 也剔除掉
         if (!filter && o == NULL && expireIfNeeded(c->db, kobj)) filter = 1;
 
         /* Remove the element and its associted value if needed. */
@@ -863,6 +890,15 @@ cleanup:
 }
 
 /* The SCAN command completely relies on scanGenericCommand. */
+// SCAN cursor [MATCH pattern] [COUNT count]
+// COUNT 参数的默认值为 10 。并非每次迭代都要使用相同的 COUNT 值。
+// 多 client 同时 SCAN 同一个 REDIS_HASH 是没有问题的，可以相互独立的
+// 因为 redis-server 本身并不记录 cursor，而是将当前的 cursor 返回给相应的 client
+// client 每次读取的时候，都带上自己的 cursor，然后 redis-server 就根据这个 cursor 来进行读写操作
+// 同时，这也暗含了：SCAN 的过程中，remove\add REDIS_HASH 将有可能导致某一个元素重复遍历、漏掉都有可能
+
+// 当 ZSET\HASH\SET 是 ZIPLIST、INTSET 的编码方式时，也就意味着数据量不会很大，为了避免在两次 SCAN 之间，ZSET\SET\HASH 发生了 remove、add 操作
+// 每次都是直接返回 ZIPLIST、INTSET 的全部内容
 void scanCommand(redisClient *c) {
     unsigned long cursor;
     if (parseScanCursorOrReply(c,c->argv[1],&cursor) == REDIS_ERR) return;
@@ -899,6 +935,8 @@ void typeCommand(redisClient *c) {
     addReplyStatus(c,type);
 }
 
+// 直接把所有 client、server 都关闭掉
+// TODO: 了解完整体启动、关闭之后再看这个函数
 void shutdownCommand(redisClient *c) {
     int flags = 0;
 
@@ -935,6 +973,7 @@ void shutdownCommand(redisClient *c) {
     addReplyError(c,"Errors trying to SHUTDOWN. Check logs.");
 }
 
+// RENAME key newkey，newkey 要是本来就存在，会被覆盖
 void renameGenericCommand(redisClient *c, int nx) {
     robj *o;
     long long expire;
@@ -1003,6 +1042,7 @@ void renamenxCommand(redisClient *c) {
     renameGenericCommand(c,1);
 }
 
+// MOVE key db
 void moveCommand(redisClient *c) {
     robj *o;
     redisDb *src, *dst;
@@ -1060,7 +1100,6 @@ void moveCommand(redisClient *c) {
     incrRefCount(o);
 
     /* OK! key moved, free the entry in the source DB */
-    // 将键从源数据库中返回
     dbDelete(src,c->argv[1]);
 
     server.dirty++;
@@ -1081,7 +1120,7 @@ int removeExpire(redisDb *db, robj *key) {
     // 确保键带有过期时间
     redisAssertWithInfo(NULL,key,dictFind(db->dict,key->ptr) != NULL);
 
-    // 删除过期时间
+    // 删除过期时间(key-value 一起删掉)
     return dictDelete(db->expires,key->ptr) == DICT_OK;
 }
 
@@ -1093,15 +1132,13 @@ void setExpire(redisDb *db, robj *key, long long when) {
     dictEntry *kde, *de;
 
     /* Reuse the sds from the main dict in the expire dict */
-    // 取出键
     kde = dictFind(db->dict,key->ptr);
 
     redisAssertWithInfo(NULL,key,kde != NULL);
 
-    // 根据键取出键的过期时间
-    de = dictReplaceRaw(db->expires,dictGetKey(kde));
+    de = dictReplaceRaw(db->expires,dictGetKey(kde));   // 没有这个 key 的话，直接新建，有的话，取出整个 entry 就好
 
-    // 设置键的过期时间
+    // 设置这个 key 的过期时间（这是为 value field）
     // 这里是直接使用整数值来保存过期时间，不是用 INT 编码的 String 对象
     dictSetSignedIntegerVal(de,when);
 }
@@ -1175,6 +1212,7 @@ void propagateExpire(redisDb *db, robj *key) {
  *
  * 返回 1 表示键已经因为过期而被删除了。
  */
+// 惰性触发，每次访问 key 的时候，都会检查一次，而不是启动一堆定时器来做这件事
 int expireIfNeeded(redisDb *db, robj *key) {
 
     // 取出键的过期时间
@@ -1193,6 +1231,8 @@ int expireIfNeeded(redisDb *db, robj *key) {
      * only the first time it is accessed and not in the middle of the
      * script execution, making propagation to slaves / AOF consistent.
      * See issue #1525 on Github for more information. */
+    // 毕竟，lua 脚本的所有命令明确了是原子的，不允许任何命令中途插入，哪怕是过期的命令，也算是中途插入的命令
+    // 这是惰性过期删除的一个缺点，编程难度、代码会变得更分散，尤其是 C 这种代码复用能力比较弱的语言
     now = server.lua_caller ? server.lua_time_start : mstime();
 
     /* If we are running in the context of a slave, return ASAP:
@@ -1207,6 +1247,7 @@ int expireIfNeeded(redisDb *db, robj *key) {
     // 它只返回一个逻辑上正确的返回值
     // 真正的删除操作要等待主节点发来删除命令时才执行
     // 从而保证数据的同步
+    // 从节点不能擅自进行删除，否则数据上的错乱会很多
     if (server.masterhost != NULL) return now > when;
 
     // 运行到这里，表示键带有过期时间，并且服务器为主节点
@@ -1260,7 +1301,7 @@ void expireGenericCommand(redisClient *c, long long basetime, int unit) {
 
     // 如果传入的过期时间是以秒为单位的，那么将它转换为毫秒
     if (unit == UNIT_SECONDS) when *= 1000;
-    when += basetime;
+    when += basetime;   // 只有指定过期时间段的时候，才需要，这样一来，下面的过程中，统一变成了处理一个未来的时间点
 
     /* No key, return zero. */
     // 取出键
@@ -1285,10 +1326,12 @@ void expireGenericCommand(redisClient *c, long long basetime, int unit) {
      */
     if (when <= mstime() && !server.loading && !server.masterhost) {
 
-        // when 提供的时间已经过期，服务器为主节点，并且没在载入数据
+        // when 提供的时间已经过期，服务器为主节点（只有 slave instance 才会填写 server.masterhost），并且没在载入数据
 
         robj *aux;
 
+        // 这种，CMD 引发的隐式操作（用户并没有在执行 delete，更不会去检查这个 delete 操作是否正常）
+        // 这种情况下，自然是采用 assert 来确保数据的正确的
         redisAssertWithInfo(c,key,dbDelete(c->db,key));
         server.dirty++;
 
@@ -1296,7 +1339,7 @@ void expireGenericCommand(redisClient *c, long long basetime, int unit) {
         // 传播 DEL 命令
         aux = createStringObject("DEL",3);
 
-        rewriteClientCommandVector(c,2,aux,key);
+        rewriteClientCommandVector(c,2,aux,key);    // 这时候要改变传播出去的命令
         decrRefCount(aux);
 
         signalModifiedKey(c->db,key);
@@ -1323,10 +1366,21 @@ void expireGenericCommand(redisClient *c, long long basetime, int unit) {
     }
 }
 
+// EXPIRE key seconds
+// 在 Redis 中，带有生存时间的 key 被称为『易失的』(volatile)。
+
+/**
+ * 过期时间的精确度
+ * TODO: 看看这个怎么做的
+ * 在 Redis 2.4 版本中，过期时间的延迟在 1 秒钟之内 —— 也即是，就算 key 已经过期，
+ * 但它还是可能在过期之后一秒钟之内被访问到，而在新的 Redis 2.6 版本中，延迟被降低到 1 毫秒之内。
+*/
 void expireCommand(redisClient *c) {
     expireGenericCommand(c,mstime(),UNIT_SECONDS);
 }
 
+// EXPIREAT key timestamp
+// 指定一个时间点过期
 void expireatCommand(redisClient *c) {
     expireGenericCommand(c,0,UNIT_SECONDS);
 }
@@ -1348,6 +1402,8 @@ void pexpireatCommand(redisClient *c) {
  *
  *  - 为 0 时，返回秒
  */
+// 当 key 不存在时，返回 -2 。
+// 当 key 存在但没有设置剩余生存时间时，返回 -1 。
 void ttlGenericCommand(redisClient *c, int output_ms) {
     long long expire, ttl = -1;
 
@@ -1387,6 +1443,7 @@ void pttlCommand(redisClient *c) {
     ttlGenericCommand(c, 1);
 }
 
+// 移除给定 key 的生存时间，将这个 key 从『易失的』(带生存时间 key )转换成『持久的』(一个不带生存时间、永不过期的 key )。
 void persistCommand(redisClient *c) {
     dictEntry *de;
 
@@ -1414,7 +1471,7 @@ void persistCommand(redisClient *c) {
 /* -----------------------------------------------------------------------------
  * API to get key arguments from commands
  * ---------------------------------------------------------------------------*/
-
+// TODO: 这些都是用在 Redis Cluster redirect，看完之后再来看
 /* The base case is to use the keys position as given in the command table
  * (firstkey, lastkey, step). */
 int *getKeysUsingCommandTable(struct redisCommand *cmd,robj **argv, int argc, int *numkeys) {

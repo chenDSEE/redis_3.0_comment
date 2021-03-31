@@ -1196,5 +1196,6 @@ void hscanCommand(redisClient *c) {
     if (parseScanCursorOrReply(c,c->argv[2],&cursor) == REDIS_ERR) return;
     if ((o = lookupKeyReadOrReply(c,c->argv[1],shared.emptyscan)) == NULL ||
         checkType(c,o,REDIS_HASH)) return;
-    scanGenericCommand(c,o,cursor); // TODO: 看完 DB 实现之后，研究一下，为什么要这样？
+    // o 是要进行 SCAN 操作的 REDIS_HASH
+    scanGenericCommand(c,o,cursor);
 }

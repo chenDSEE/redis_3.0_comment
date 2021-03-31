@@ -449,6 +449,8 @@ void msetGenericCommand(redisClient *c, int nx) {
         // 将键值对关联到数据库
         // c->argc[j] 为键
         // c->argc[j+1] 为值
+        // 你没有看错，哪怕是向 redis 存 string 类型的数据，也是需要 key 的，而且你真正想要保存的数据是 value
+        // key 只不过是用来找到你想要保存的 string 的一个 handler
         setKey(c->db,c->argv[j],c->argv[j+1]);
 
         // 发送事件通知
