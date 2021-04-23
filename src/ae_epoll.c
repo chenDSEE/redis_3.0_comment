@@ -39,10 +39,13 @@ typedef struct aeApiState {
     // epoll_event 实例描述符
     int epfd;
 
-    // 事件槽
+    // 事件槽，给 epoll_wait() 填装，返回已经就绪的事件（相当于一个 buf，将会被重复使用）
     struct epoll_event *events;
 
 } aeApiState;
+// aeApiState 只是一个 epoll_event 的管理节点，
+// 每一个具体的 event 则是在 struct epoll_event *events 这个指针指向的一堆 struct epoll_event 中
+// 所以在扩容、缩小的时候，直接替换指针就很方便，而且不会要求上层代码做出相应的处理
 
 /*
  * 创建一个新的 epoll 实例，并将它赋值给 eventLoop
@@ -53,7 +56,8 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
 
     if (!state) return -1;
 
-    // 初始化事件槽空间
+    // 初始化事件槽空间（从 epoll_wait 里面一次性能返回多少就绪事件，而不是这个 epoll-instance 能管理多少个事件，虽然实际数值是一样的，但并不是同一个概念）
+    // epoll-instance 能管理多少个事件是：aeEventLoop->events
     state->events = zmalloc(sizeof(struct epoll_event)*eventLoop->setsize);
     if (!state->events) {
         zfree(state);
@@ -61,6 +65,7 @@ static int aeApiCreate(aeEventLoop *eventLoop) {
     }
 
     // 创建 epoll 实例
+    // Since Linux 2.6.8, the size argument is ignored, but must be greater than zero;
     state->epfd = epoll_create(1024); /* 1024 is just a hint for the kernel */
     if (state->epfd == -1) {
         zfree(state->events);
@@ -96,10 +101,11 @@ static void aeApiFree(aeEventLoop *eventLoop) {
 
 /*
  * 关联给定事件到 fd
+ * TODO: 为什么要用 mask 来设置监听的事件？mask 在填写的时候就是：EPOLLIN | EPOLLOUT 这种风格吗？（这时候，flag 作为变量名更适合吧？）
  */
 static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
     aeApiState *state = eventLoop->apidata;
-    struct epoll_event ee;
+    struct epoll_event ee;  // 只是一次性使用的，epoll_ctl 内部会采用深拷贝的方式，将相应的事件信息加入红黑树中
 
     /* If the fd was already monitored for some event, we need a MOD
      * operation. Otherwise we need an ADD operation. 
@@ -111,14 +117,17 @@ static int aeApiAddEvent(aeEventLoop *eventLoop, int fd, int mask) {
     int op = eventLoop->events[fd].mask == AE_NONE ?
             EPOLL_CTL_ADD : EPOLL_CTL_MOD;
 
-    // 注册事件到 epoll
+    // 创建监听的 epoll_event(redis 采用默认的 level-triggered 方案)
     ee.events = 0;
     mask |= eventLoop->events[fd].mask; /* Merge old events */
+    // 一定要先 merge old events 不然 epoll_ctl 的时候，就会丢失监听的事件了
+    // merge old event 的方案，比你默认设置更好，更有兼容性
     if (mask & AE_READABLE) ee.events |= EPOLLIN;
     if (mask & AE_WRITABLE) ee.events |= EPOLLOUT;
     ee.data.u64 = 0; /* avoid valgrind warning */
     ee.data.fd = fd;
 
+    // 注册事件到 epoll
     if (epoll_ctl(state->epfd,op,fd,&ee) == -1) return -1;
 
     return 0;
@@ -131,6 +140,7 @@ static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int delmask) {
     aeApiState *state = eventLoop->apidata;
     struct epoll_event ee;
 
+    // 只会删除 eventLoop->events[fd].mask 跟 delmask 共同所有的事件
     int mask = eventLoop->events[fd].mask & (~delmask);
 
     ee.events = 0;
@@ -149,6 +159,8 @@ static void aeApiDelEvent(aeEventLoop *eventLoop, int fd, int delmask) {
 
 /*
  * 获取可执行事件
+ * struct timeval *tvp 设置了 epoll 调用的时长
+ * 这个时长的设置取决于是否有 timer-event、是否设置了 AE_DONT_WAIT 这个 flag
  */
 static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     aeApiState *state = eventLoop->apidata;
@@ -158,7 +170,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
     retval = epoll_wait(state->epfd,state->events,eventLoop->setsize,
             tvp ? (tvp->tv_sec*1000 + tvp->tv_usec/1000) : -1);
 
-    // 有至少一个事件就绪？
+    // 有至少一个事件就绪，然后将所有的就绪事件填装进去 eventLoop->fired
     if (retval > 0) {
         int j;
 
@@ -169,6 +181,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
             int mask = 0;
             struct epoll_event *e = state->events+j;
 
+            // TODO: 为什么会有这样的映射关系？
             if (e->events & EPOLLIN) mask |= AE_READABLE;
             if (e->events & EPOLLOUT) mask |= AE_WRITABLE;
             if (e->events & EPOLLERR) mask |= AE_WRITABLE;
@@ -178,7 +191,7 @@ static int aeApiPoll(aeEventLoop *eventLoop, struct timeval *tvp) {
             eventLoop->fired[j].mask = mask;
         }
     }
-    
+
     // 返回已就绪事件个数
     return numevents;
 }

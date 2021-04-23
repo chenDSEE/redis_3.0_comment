@@ -1369,11 +1369,12 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
     /* We received a SIGTERM, shutting down here in a safe way, as it is
      * not ok doing so inside the signal handler. */
-    // 服务器进程收到 SIGTERM 信号，关闭服务器
+    // 优雅的关闭 server，完成必要的步骤之后，才退出 redis-server，服务器进程收到 SIGTERM 信号，关闭服务器
+    // 不完全可靠，因为 kill -9 是没有办法捕获的
     if (server.shutdown_asap) {
 
         // 尝试关闭服务器
-        if (prepareForShutdown(0) == REDIS_OK) exit(0);
+        if (prepareForShutdown(0) == REDIS_OK) exit(0); // 整个 redis-server 都结束了
 
         // 如果关闭失败，那么打印 LOG ，并移除关闭标识
         redisLog(REDIS_WARNING,"SIGTERM received but errors trying to shut down the server, check the logs for more information");
@@ -2534,6 +2535,30 @@ void call(redisClient *c, int flags) {
  * 调用者可以继续执行其他操作。
  * 否则，如果这个函数返回 0 ，那么表示客户端已经被销毁。
  */
+/**
+ * CMD 执行的调用过程：
+ * 1. redis-cli 采用 RESP 的方式发送相关的 CMD 给 redis-server;
+ * 2. redis-server 的 epoll-instance 检测到相应的 socket 发生了 read 事件，
+ *    调用 readQueryFromClient();
+ * 3. readQueryFromClient() 将 redis-cli 发送过来的内容（采用了 RESP 协议），
+ *    保存到 c->querybuf 中；（TCP 的 stream 式协议，必须拥有用户态的 buf，避免 short read 的问题）
+ * 4. 调用 processInputBuffer()，将 RESP 格式的内容，解析并保存到 argv[argc] 中；
+ *    while (c->querybuf) {
+ *        5. 根据协议的种类，决定采用什么方式解析 c->querybuf 里面的内容
+ * 
+ *        6. if (c->querybuf 中包含一个完整的小命令，bulk) {
+ *               将 c->querybuf 中的内容解析为 argv[argc]
+ *           } else {
+ *               不解析 c->querybuf 中的内容，直到下一 read 在检查：是否收到至少一个完整的小命令，bulk
+ *           }
+ * 
+ *        7. if (成功解析完整的 argv[argc]) {
+ *               8. 调用 processCommand(), 也就是下面这个函数，根据 CMD 的类型进一步分发处理
+ *               9. resetClient(), 为下一个 CMD 做准备
+ *           }
+ *    }
+ * 
+*/
 int processCommand(redisClient *c) {
     /* The QUIT command is handled separately. Normal command procs will
      * go through checking for replication and QUIT will cause trouble

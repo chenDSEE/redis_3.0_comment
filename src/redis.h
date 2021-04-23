@@ -124,6 +124,8 @@
 #define REDIS_IP_STR_LEN INET6_ADDRSTRLEN
 #define REDIS_PEER_ID_LEN (REDIS_IP_STR_LEN+32) /* Must be enough for ip:port */
 #define REDIS_BINDADDR_MAX 16
+// It also reserves a number of file. why 32 ? That is the number of file descriptors Redis reserves for internal uses
+/* REDIS_MIN_RESERVED_FDS for extra operations of persistence, listening sockets, log files and so forth. */
 #define REDIS_MIN_RESERVED_FDS 32
 
 #define ACTIVE_EXPIRE_CYCLE_LOOKUPS_PER_LOOP 20 /* Loopkups per loop. */
@@ -274,6 +276,22 @@
 
 /* Client classes for client limits, currently used only for
  * the max-client-output-buffer limit implementation. */
+/**
+ * 1. REDIS_CLIENT_LIMIT_CLASS_NORMAL
+ * have a default limit of 0, that means, no limit at all, because most normal
+ * clients use blocking implementations sending a single command and waiting for
+ * the reply to be completely read before sending the next command, so it is
+ * always not desirable to close the connection in case of a normal client.（因此，对于普通的客户端，总是不希望关闭连接。）
+ * 
+ * 2. REDIS_CLIENT_LIMIT_CLASS_PUBSUB
+ * have a default hard limit of 32 megabytes and a soft limit of 8 megabytes per 60 seconds.（TODO: 为什么？）
+ * 
+ * 3. REDIS_CLIENT_LIMIT_CLASS_SLAVE
+ * have a default hard limit of 256 megabytes and a soft limit of 64 megabyte per 60 second.
+ * 
+ * 4. REDIS_CLIENT_LIMIT_NUM_CLASSES
+ * 仅仅是作为一个末尾的计数值
+*/
 #define REDIS_CLIENT_LIMIT_CLASS_NORMAL 0
 #define REDIS_CLIENT_LIMIT_CLASS_SLAVE 1
 #define REDIS_CLIENT_LIMIT_CLASS_PUBSUB 2
@@ -631,7 +649,11 @@ typedef struct redisClient {
     // 客户端的名字
     robj *name;             /* As set by CLIENT SETNAME */
 
-    // 查询缓冲区
+//==============================================================================
+// redis-server 读取 redis-cli 发送过来的数据
+    // client 发过来的 req buf，将 read() 中的  RESP 协议内容，直接放到这个 buf 里面
+    // (TODO:(DONE) 为什么是 sds？)，因为 RESP 协议的内容就是字符串，而 sds 刚好就能够处理二进制安全的字符串
+    // 而且用 sds 来管理，还省了 buf 的长度等信息的管理，相应 api 的重新封装
     sds querybuf;
 
     // 查询缓冲区长度峰值
@@ -644,27 +666,23 @@ typedef struct redisClient {
     // 而且 robj 并不是每一个都不一样的，有时候可以通过 share 的方式来复用的，所以没必要每次都为 CLI 中的内容，都创建一个 robj
     robj **argv;
 
+    // 请求的类型：内联命令还是多条命令（基本上由 client 的种类就可以决定了）
+    // 一个 CMD 用一次，用完后清零
+    int reqtype;
+
+    // 从 RESP 里面发现 *3xxxxxx 格式的内容，然后这个 multibulklen = 3；意味着，这个 multi-bulk 类型的内容
+    // 由 3 个小命令构成，一个 CMD 用一次，用完后清零
+    int multibulklen;       /* number of multi bulk arguments left to read */
+
+    // 命令内容的长度（每一个小的命令，具体有多长）
+    // $100, 就意味着这个小命令的长度是 100，一个 CMD 用一次，用完后 reset
+    long bulklen;           /* length of bulk argument in multi bulk request */
+//==============================================================================
+
     // 记录被客户端执行的命令
     struct redisCommand *cmd, *lastcmd;
 
-    // 请求的类型：内联命令还是多条命令
-    int reqtype;
 
-    // 剩余未读取的命令内容数量
-    int multibulklen;       /* number of multi bulk arguments left to read */
-
-    // 命令内容的长度
-    long bulklen;           /* length of bulk argument in multi bulk request */
-
-    // 回复链表
-    list *reply;
-
-    // 回复链表中对象的总大小
-    unsigned long reply_bytes; /* Tot bytes of objects in reply list */
-
-    // 已发送字节，处理 short write 用
-    int sentlen;            /* Amount of bytes already sent in the current
-                               buffer or object being sent. */
 
     // 创建客户端的时间
     time_t ctime;           /* Client creation time */
@@ -732,10 +750,38 @@ typedef struct redisClient {
     list *pubsub_patterns;  /* patterns a client is interested in (SUBSCRIBE) */
     sds peerid;             /* Cached peer ID. */
 
+//==============================================================================
     /* Response buffer */
-    // 回复偏移量
+    // 回复链表(可能要随时释放掉、更换 list，所以采用指针的方式，而不是拥有一个头节点或管理节点)
+    // TODO:(DONE) 这个 list 里面装的是什么？为什么 _addReplyToBuffer() 中，if (listLength(c->reply) > 0) return REDIS_ERR;
+    // Redis needs to handle a variable-length output buffer for every client
+    // 一旦使用了 reply-list 就可以认为是 buf 已经满了，接下来之后利用 reply-list 来进一步容纳大量数据了
+    list *reply;
+
+
+    /* 通过 bufpos 跟 sentlen 来 handle buf 里面的 data 发送情况
+     * bufpos  是指 buf 里面有多少数据，buf 用到了哪里；
+     * sentlen 则是 buf 里面的数据哪些是已经被发送出去了的，发送到了什么程度
+     * reply_bytes 是 reply-list 里面有一共有多少 byte 的 data 部分需要发送
+     * 
+     * 所以当 buf 里面的内容被清空之后，上面这两个计数器也是要被 reset 为 0 的
+     * 通常是 sentlen + bufpos 或 sentlen + reply_bytes 配合使用
+     */
+
+    // 回复链表中对象的总大小(仅仅是所有 data 部分加起来，不包含 header 部分)
+    unsigned long reply_bytes; /* Tot bytes of objects in reply list */
+
+    // 已发送字节，处理 short write 用
+    int sentlen;            /* Amount of bytes already sent in the current
+                               buffer or object being sent. */
+
+
+    // 回复偏移量(不是 address，而是类似于 index 的)，相当于记录 buf 用到了哪里
     int bufpos;
-    // 回复缓冲区
+    // (output-buf)回复缓冲区
+    // TODO:(DONE) 超出了这个 buff 该怎么办？
+    // 1. 满了就使用 reply 这里 list 进一步拓展缓冲区
+    // 2. reply-list 也装得太多了，那就只能够直接异步 close 掉这个 client，不然内存占用实在是过多了
     char buf[REDIS_REPLY_CHUNK_BYTES];
 
 } redisClient;
@@ -1005,7 +1051,7 @@ struct redisServer {
 
     // 一个链表，保存了所有客户端状态结构
     list *clients;              /* List of active clients */
-    // 链表，保存了所有待关闭的客户端
+    // 链表，保存了所有待关闭的客户端，实现异步关闭（参考：freeClientAsync() 函数，加入；freeClientsInAsyncFreeQueue() 函数，释放）
     list *clients_to_close;     /* Clients to close asynchronously */
 
     // 链表，保存了所有从服务器，以及所有监视器

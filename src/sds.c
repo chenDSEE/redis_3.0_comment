@@ -1290,6 +1290,7 @@ int hex_digit_to_int(char c) {
  * 函数都会将已成功处理的字符串先返回。
  *
  * 这个函数主要用于 config.c 中对配置文件进行分析。
+ * 还有 redis-server 解析 client-socket 发送过来的 inline 格式协议内容
  * 例子：
  *  sds *arr = sdssplitargs("timeout 10086\r\nport 123321\r\n");
  * "timeout 10086\r\nport 123321\r\n" 这个字符串是已经被 sdscatrepr() 处理过的(将文本文件里面的不可打印字符转换出来)

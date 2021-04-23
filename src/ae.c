@@ -86,7 +86,7 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
     eventLoop->stop = 0;
     eventLoop->maxfd = -1;
     eventLoop->beforesleep = NULL;
-    if (aeApiCreate(eventLoop) == -1) goto err;
+    if (aeApiCreate(eventLoop) == -1) goto err; // 创建实际干活的 epoll-instance
 
     /* Events with mask == AE_NONE are not set. So let's initialize the
      * vector with it. */
@@ -128,11 +128,13 @@ int aeGetSetSize(aeEventLoop *eventLoop) {
  *
  * 否则，执行大小调整操作，并返回 AE_OK 。
  */
+// CONFIG set maxclients 15000 会调用这个函数，setsize = 15128
 int aeResizeSetSize(aeEventLoop *eventLoop, int setsize) {
     int i;
 
     if (setsize == eventLoop->setsize) return AE_OK;
     if (eventLoop->maxfd >= setsize) return AE_ERR;
+    // 底层将会调用 realloc，将会自动把原来的数据，搬到新的内存上（因为 maxfd >= setsize 会直接 AE_ERR）
     if (aeApiResize(eventLoop,setsize) == -1) return AE_ERR;
 
     eventLoop->events = zrealloc(eventLoop->events,sizeof(aeFileEvent)*setsize);
@@ -166,7 +168,14 @@ void aeStop(aeEventLoop *eventLoop) {
 /*
  * 根据 mask 参数的值，监听 fd 文件的状态，
  * 当 fd 可用时，执行 proc 函数
+ * 
+ * 所谓的 create file event 是指：为这一个 socket_fd 创建一个关心的事件（read\write）并将这个事件加进 epoll-instance 的红黑树里面
+ * 基本上是不能同时设置 read + write 的，除非你 read\write 的 callback 都是一样的
+ * TODO: 为什么要这样设计？这样岂不是不能够同时 handle read\write 事件了？难道要回消息的时候，再异步地 write 出去？为什么要这样做？
+ * TODO: connectWithMaster() 为什么这个函数却是打算同时允许 read\write 的？
  */
+// accept(listen_socket_fd) --> acceptCommonHandler() --> createClient() --> aeCreateFileEvent()
+// clientData = struct redisClient*
 int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
         aeFileProc *proc, void *clientData)
 {
@@ -184,7 +193,7 @@ int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
     if (aeApiAddEvent(eventLoop, fd, mask) == -1)
         return AE_ERR;
 
-    // 设置文件事件类型，以及事件的处理器
+    // 设置文件事件类型，以及事件的处理器（当事件发生的时候，可以进行校验）
     fe->mask |= mask;
     if (mask & AE_READABLE) fe->rfileProc = proc;
     if (mask & AE_WRITABLE) fe->wfileProc = proc;
@@ -218,7 +227,7 @@ void aeDeleteFileEvent(aeEventLoop *eventLoop, int fd, int mask)
         /* Update the max fd */
         int j;
 
-        for (j = eventLoop->maxfd-1; j >= 0; j--)
+        for (j = eventLoop->maxfd-1; j >= 0; j--)   // 寻找新的 maxfd
             if (eventLoop->events[j].mask != AE_NONE) break;
         eventLoop->maxfd = j;
     }
@@ -279,6 +288,8 @@ static void aeAddMillisecondsToNow(long long milliseconds, long *sec, long *ms) 
 
 /*
  * 创建时间事件
+ * 并不会为每一个 key 都做一个 time_event 来进行过期处理，而是通过惰性删除的方式完成过期处理
+ * 这样能够将庞大的系统开销分散到每一个 CMD 里面
  */
 long long aeCreateTimeEvent(aeEventLoop *eventLoop, long long milliseconds,
         aeTimeProc *proc, void *clientData,
@@ -318,14 +329,14 @@ int aeDeleteTimeEvent(aeEventLoop *eventLoop, long long id)
 {
     aeTimeEvent *te, *prev = NULL;
 
-    // 遍历链表
+    // 遍历链表（因为是遍历链表的关系，不宜过多定时事件）
     te = eventLoop->timeEventHead;
     while(te) {
 
         // 发现目标事件，删除
         if (te->id == id) {
 
-            if (prev == NULL)
+            if (prev == NULL)   // 删除的是头节点
                 eventLoop->timeEventHead = te->next;
             else
                 prev->next = te->next;
@@ -368,7 +379,7 @@ static aeTimeEvent *aeSearchNearestTimer(aeEventLoop *eventLoop)
         if (!nearest || te->when_sec < nearest->when_sec ||
                 (te->when_sec == nearest->when_sec &&
                  te->when_ms < nearest->when_ms))
-            nearest = te;
+            nearest = te;   // 这时候其实可以直接 break 出去的，而不是用 if(!nearest) 来走完所有的 while-loop
         te = te->next;
     }
     return nearest;
@@ -377,6 +388,7 @@ static aeTimeEvent *aeSearchNearestTimer(aeEventLoop *eventLoop)
 /* Process time events
  *
  * 处理所有已到达的时间事件
+ * Note that this is NOT great algorithmically. Redis uses a single time event so it's not a problem
  */
 static int processTimeEvents(aeEventLoop *eventLoop) {
     int processed = 0;
@@ -384,7 +396,7 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
     long long maxId;
     time_t now = time(NULL);
 
-    /* If the system clock is moved to the future, and then set back to the
+    /* If the system clock is moved to the future（未来的时间）, and then set back to the
      * right value, time events may be delayed in a random way. Often this
      * means that scheduled operations will not be performed soon enough.
      *
@@ -395,9 +407,10 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
     // 通过重置事件的运行时间，
     // 防止因时间穿插（skew）而造成的事件处理混乱
     if (now < eventLoop->lastTime) {
+        // 现在的时间，再上一次触发 timer-event 之前，显然 system clock 被改动过
         te = eventLoop->timeEventHead;
         while(te) {
-            te->when_sec = 0;
+            te->when_sec = 0;   // 将所有 timer-event 全部都立马触发一次，以更新所有时间的触发时间点
             te = te->next;
         }
     }
@@ -418,7 +431,7 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
             continue;
         }
         
-        // 获取当前时间
+        // 获取当前时间(因为 while-loop 的时间可能比较长，所以每一次都要更新)
         aeGetTime(&now_sec, &now_ms);
 
         // 如果当前时间等于或等于事件的执行时间，那么说明事件已到达，执行这个事件
@@ -428,7 +441,7 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
             int retval;
 
             id = te->id;
-            // 执行事件处理器，并获取返回值
+            // 执行事件处理的 callback，并获取返回值
             retval = te->timeProc(eventLoop, id, te->clientData);
             processed++;
             /* After an event is processed our time event list may
@@ -458,6 +471,7 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
             // 因此需要将 te 放回表头，继续开始执行事件
             te = eventLoop->timeEventHead;
         } else {
+            // 时间还没有到达，等等再说
             te = te->next;
         }
     }
@@ -506,8 +520,8 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
      * file events to process as long as we want to process time
      * events, in order to sleep until the next time event is ready
      * to fire. */
-    if (eventLoop->maxfd != -1 ||
-        ((flags & AE_TIME_EVENTS) && !(flags & AE_DONT_WAIT))) {
+    if (eventLoop->maxfd != -1 ||   // 说明已经注册了 file-event，可能要进行处理
+        ((flags & AE_TIME_EVENTS) && !(flags & AE_DONT_WAIT))) {    // flag 指明了：需要处理 timer-event，而且是立即处理（AE_DONT_WAIT）
         int j;
         aeTimeEvent *shortest = NULL;
         struct timeval tv, *tvp;
@@ -534,7 +548,8 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
                 tvp->tv_usec = (shortest->when_ms - now_ms)*1000;
             }
 
-            // 时间差小于 0 ，说明事件已经可以执行了，将秒和毫秒设为 0 （不阻塞）
+            // 时间差小于 0 ，说明有 timer-event 事件已经可以执行了，将秒和毫秒设为 0 （不阻塞）
+            // 避免过度耽误 timer-event
             if (tvp->tv_sec < 0) tvp->tv_sec = 0;
             if (tvp->tv_usec < 0) tvp->tv_usec = 0;
         } else {

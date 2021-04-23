@@ -60,6 +60,8 @@
 #define REDIS_CLI_KEEPALIVE_INTERVAL 15 /* seconds */
 #define REDIS_CLI_DEFAULT_PIPE_TIMEOUT 30 /* seconds */
 
+// 整个 client 只会有一个 context，才尝试连接 server 的时候创建，连接失败就 free 掉
+// 内部包含了 client 的 TCP buf
 static redisContext *context;
 static struct config {
     char *hostip;
@@ -352,6 +354,7 @@ static int cliConnect(int force) {
          * in order to prevent timeouts caused by the execution of long
          * commands. At the same time this improves the detection of real
          * errors. */
+        // TODO: in order to prevent timeouts caused by the execution of long commands. 这是想干嘛？为什么能达到这种效果？
         anetKeepAlive(NULL, context->fd, REDIS_CLI_KEEPALIVE_INTERVAL);
 
         /* Do AUTH and select the right DB. */
@@ -1005,8 +1008,9 @@ static int evalMode(int argc, char **argv) {
 }
 
 /*------------------------------------------------------------------------------
- * Latency and latency history modes
+ * Latency and latency history modes(Enter a special mode continuously sampling latency.)
  *--------------------------------------------------------------------------- */
+// 用来测试 redis-cli 到 redis-server 的 request 延迟情况，会不停地发送请求
 
 #define LATENCY_SAMPLE_RATE 10 /* milliseconds. */
 #define LATENCY_HISTORY_DEFAULT_INTERVAL 15000 /* milliseconds. */
@@ -1053,9 +1057,9 @@ static void latencyMode(void) {
 }
 
 /*------------------------------------------------------------------------------
- * Slave mode
+ * Slave mode(Simulate a slave showing commands received from the master.)
  *--------------------------------------------------------------------------- */
-
+// 伪装成一个从节点，然后 debug 主节点的同步事件
 /* Sends SYNC and reads the number of bytes in the payload. Used both by
  * slaveMode() and getRDB(). */
 unsigned long long sendSync(int fd) {
@@ -1120,8 +1124,9 @@ static void slaveMode(void) {
 }
 
 /*------------------------------------------------------------------------------
- * RDB transfer mode
+ * RDB transfer mode(Transfer an RDB dump from remote server to local file.)
  *--------------------------------------------------------------------------- */
+// 主动向 server 发出请求，然后将 server 当前的数据库内容做成一个 rdb 快照，保存在 redis-cli --rdb 调用的地方
 
 /* This function implements --rdb, so it uses the replication protocol in order
  * to fetch the RDB file from a remote server. */
@@ -1171,6 +1176,9 @@ static void getRDB(void) {
 /*------------------------------------------------------------------------------
  * Bulk import (pipe) mode
  *--------------------------------------------------------------------------- */
+// cat data.txt | redis-cli --pipe
+// 通过 redis-cli 的 pipe mode，快速向 redis-server 插入大量数据
+// data.txt 里面的必须采用 redis 的专有协议
 
 static void pipeMode(void) {
     int fd = context->fd;
@@ -1324,9 +1332,9 @@ static void pipeMode(void) {
 }
 
 /*------------------------------------------------------------------------------
- * Find big keys
+ * Find big keys(--bigkeys, Sample Redis keys looking for big keys.)
  *--------------------------------------------------------------------------- */
-
+// 查找 redis-server 存不存在 big-key 问题
 #define TYPE_STRING 0
 #define TYPE_LIST   1
 #define TYPE_SET    2
@@ -1604,6 +1612,29 @@ static void findBigKeys(void) {
  * Stats mode
  *--------------------------------------------------------------------------- */
 
+/**
+ * 查看当前个 server 的情况
+ * 
+ * [root@Jarvis my-version]# ./redis-cli --stat
+ * ------- data ------ --------------------- load -------------------- - child -
+ * keys       mem      clients blocked requests            connections          
+ * 14         800.98K  1       0       2 (+0)              3           
+ * 14         800.98K  1       0       3 (+1)              3           
+ * 14         800.98K  1       0       4 (+1)              3           
+ * 14         800.98K  1       0       5 (+1)              3           
+ * 14         800.98K  1       0       6 (+1)              3           
+ * 14         800.98K  1       0       7 (+1)              3           
+ * 14         800.98K  1       0       8 (+1)              3           
+ * 14         800.98K  1       0       9 (+1)              3           
+ * 14         800.98K  1       0       10 (+1)             3           
+ * 14         800.98K  1       0       11 (+1)             3           
+ * 14         800.98K  1       0       12 (+1)             3           
+ * 14         800.98K  1       0       13 (+1)             3           
+ * 14         800.98K  1       0       14 (+1)             3           
+ * 14         800.98K  1       0       15 (+1)             3           
+ * [root@Jarvis my-version]# 
+*/
+
 /* Return the specified INFO field from the INFO command output "info".
  * A new buffer is allocated for the result, that needs to be free'd.
  * If the field is not found NULL is returned. */
@@ -1744,9 +1775,10 @@ static void statMode() {
 }
 
 /*------------------------------------------------------------------------------
- * Scan mode
+ * Scan mode(List all keys using the SCAN command.)
  *--------------------------------------------------------------------------- */
 
+// ./redis-cli --scan --pattern '*'
 static void scanMode() {
     redisReply *reply;
     unsigned long long cur = 0;
@@ -1877,12 +1909,15 @@ int main(int argc, char **argv) {
     else
         config.output = OUTPUT_STANDARD;
     config.mb_delim = sdsnew("\n");
-    cliInitHelp();
+    cliInitHelp();  // 加载 help 命令的信息（省的去跟 radius-server 要，浪费 server 的资源）
 
     firstarg = parseOptions(argc,argv);
     argc -= firstarg;
     argv += firstarg;
 
+    /**
+     * 这些所谓的 mode，是官方提供给 redis-server 使用者的 debug 工具
+    */
     /* Latency mode */
     if (config.latency_mode) {
         if (cliConnect(0) == REDIS_ERR) exit(1);
