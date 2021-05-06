@@ -188,7 +188,7 @@ static const rio rioFileIO = {
     rioFileTell,
     NULL,           /* update_checksum */
     0,              /* current checksum */
-    0,              /* bytes read or written */
+    0,              /* bytes had been read or written */
     0,              /* read/write chunk size */
     { { NULL, 0 } } /* union for io-specific vars */
 };
@@ -197,7 +197,7 @@ static const rio rioFileIO = {
  * 初始化文件流
  */
 void rioInitWithFile(rio *r, FILE *fp) {
-    *r = rioFileIO;
+    *r = rioFileIO; // 采用 copy 构造的方式，快速初始化
     r->io.file.fp = fp;
     r->io.file.buffered = 0;
     r->io.file.autosync = 0;

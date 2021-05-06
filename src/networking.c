@@ -2399,7 +2399,7 @@ int clientsArePaused(void) {
             c = listNodeValue(ln);
 
             if (c->flags & REDIS_SLAVE) continue;
-            listAddNodeTail(unblocked_clients,c);
+            listAddNodeTail(server.unblocked_clients,c);
         }
     }
     return server.clients_paused;

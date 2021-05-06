@@ -30,7 +30,32 @@
 #include "redis.h"
 
 /* This file implements keyspace events notification via Pub/Sub ad
- * described at http://redis.io/topics/keyspace-events. */
+ * described at https://redis.io/topics/notifications. */
+
+/**
+ * Keyspace notifications allow clients to subscribe to Pub/Sub channels in order to
+ * receive events affecting the Redis data set in some way.
+ * 
+ * Because Redis Pub/Sub is **fire and forget**(发出去就算了，不可靠) currently
+ * there is no way to use this feature if your application demands **reliable notification** of events,
+ * that is, if your Pub/Sub client disconnects, and reconnects later, all the events
+ * delivered during the time the client was disconnected are lost.
+ * 
+ * EXAMPLE:
+ * 对于每个修改数据库的操作，键空间通知都会发送两种不同类型的事件。
+ * 比如说，对 0 号数据库的键 mykey 执行 DEL 命令时， 系统将分发两条消息， 相当于执行以下两个 PUBLISH 命令：
+ * PUBLISH __keyspace@0__:mykey del
+ * PUBLISH __keyevent@0__:del mykey
+ * 
+ * 1. 以 keyspace 为前缀的频道被称为键空间通知（key-space notification）
+ *    键空间频道(__keyspace@0__:mykey)的订阅者将接收到被执行的 事件 的名字，在这个例子中，就是 del 。
+ *    订阅这个 __keyspace@0__:mykey channel 是为了时刻盯着 mykey 这个 key 是否被操作过，被什么命令操作过
+ * 2. 以 keyevent 为前缀的频道则被称为键事件通知（key-event notification）
+ *    键事件频道(__keyevent@0__:del)的订阅者将接收到被执行事件的键的名字，在这个例子中，就是 mykey 。
+ *    订阅这个 __keyspace@0__:del channel 是为了时刻盯着 del 这个命令是否被执行过，被执行的 key 是什么
+ * 
+*/
+
 
 /* Turn a string representing notification classes into an integer
  * representing notification classes flags xored.
@@ -42,6 +67,7 @@
  *
  * 如果传入的字符串中有不能识别的字符串，那么返回 -1 。
  */
+// configure redis-server 的时候使用
 int keyspaceEventsStringToFlags(char *classes) {
     char *p = classes;
     int c, flags = 0;
@@ -98,19 +124,24 @@ sds keyspaceEventsFlagsToString(int flags) {
 
 /* The API provided to the rest of the Redis core is a simple function:
  *
- * notifyKeyspaceEvent(char *event, robj *key, int dbid);
+ * notifyKeyspaceEvent(int type, char *event, robj *key, int dbid)
  *
- * 'event' is a C string representing the event name.
- *
- * event 参数是一个字符串表示的事件名
- *
- * 'key' is a Redis object representing the key name.
- *
- * key 参数是一个 Redis 对象表示的键名
- *
- * 'dbid' is the database ID where the key lives.  
- *
- * dbid 参数为键所在的数据库
+ * type 则是用来跟 redis-server 的配置进行检查的，可能的取值：
+ * REDIS_NOTIFY_KEYSPACE
+ * REDIS_NOTIFY_KEYEVENT
+ * REDIS_NOTIFY_GENERIC
+ * REDIS_NOTIFY_STRING
+ * REDIS_NOTIFY_LIST
+ * REDIS_NOTIFY_SET
+ * REDIS_NOTIFY_HASH
+ * REDIS_NOTIFY_ZSET
+ * REDIS_NOTIFY_EXPIRED
+ * REDIS_NOTIFY_EVICTED
+ * REDIS_NOTIFY_ALL
+ * 
+ * 'event' is a C string representing the event name. 用来组成 channel 的一部分
+ * 'key' is a Redis object representing the key name. 用来组成 channel 的一部分
+ * 'dbid' is the database ID where the key lives.
  */
 void notifyKeyspaceEvent(int type, char *event, robj *key, int dbid) {
     sds chan;

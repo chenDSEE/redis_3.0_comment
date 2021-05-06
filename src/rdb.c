@@ -39,6 +39,15 @@
 #include <sys/wait.h>
 #include <arpa/inet.h>
 #include <sys/stat.h>
+/**
+ * How it works
+ * Whenever Redis needs to dump the dataset to disk, this is what happens:
+ *   1. Redis forks. We now have a child and a parent process.
+ *   2. The child starts to write the dataset to a temporary RDB file.
+ *   3. When the child is done writing the new RDB file, it replaces the old one.
+ * 
+ * This method allows Redis to benefit from copy-on-write semantics.
+*/
 
 /*
  * 将长度为 len 的字符数组 p 写入到 rdb 中。
@@ -923,6 +932,7 @@ int rdbSaveKeyValuePair(rio *rdb, robj *key, robj *val,
  *
  * 保存成功返回 REDIS_OK ，出错/失败返回 REDIS_ERR 。
  */
+// 无论是前台还是后台 save RDB，最终都是跑到这里来
 int rdbSave(char *filename) {
     dictIterator *di = NULL;
     dictEntry *de;
@@ -1843,6 +1853,7 @@ void backgroundSaveDoneHandler(int exitcode, int bysignal) {
     updateSlavesWaitingBgsave(exitcode == 0 ? REDIS_OK : REDIS_ERR);
 }
 
+// #define REDIS_DEFAULT_RDB_FILENAME "dump.rdb" 默认的 RDB 名字
 void saveCommand(redisClient *c) {
 
     // BGSAVE 已经在执行中，不能再执行 SAVE

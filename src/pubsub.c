@@ -60,6 +60,7 @@ int listMatchPubsubPattern(void *a, void *b) {
  *
  * 订阅成功返回 1 ，如果客户端已经订阅了该频道，那么返回 0 。
  */
+// robj *channel, channel 名字的字符串
 int pubsubSubscribeChannel(redisClient *c, robj *channel) {
     dictEntry *de;
     list *clients = NULL;
@@ -67,11 +68,12 @@ int pubsubSubscribeChannel(redisClient *c, robj *channel) {
 
     /* Add the channel to the client -> channels hash table */
     // 将 channels 填接到 c->pubsub_channels 的集合中（值为 NULL 的字典视为集合）
+    // c->pubsub_channels 用来给这个 client 对已订阅 channel 进行去重的 set
     if (dictAdd(c->pubsub_channels,channel,NULL) == DICT_OK) {
         retval = 1;
         incrRefCount(channel);
 
-        // 关联示意图
+        // server.pubsub_channels publish 使用到的 hash-table
         // {
         //  频道名        订阅频道的客户端
         //  'channel-a' : [c1, c2, c3],
@@ -124,6 +126,7 @@ int pubsubSubscribeChannel(redisClient *c, robj *channel) {
  *
  * 如果取消成功返回 1 ，如果因为客户端未订阅频道，而造成取消失败，返回 0 。
  */
+// notify == 0\1 取决于 redis-cli 是主动退订 channel(使用 Unsubscribe 命令)，还是被动退订 channel(整个 redis-cli 都退出了)
 int pubsubUnsubscribeChannel(redisClient *c, robj *channel, int notify) {
     dictEntry *de;
     list *clients;
@@ -131,7 +134,7 @@ int pubsubUnsubscribeChannel(redisClient *c, robj *channel, int notify) {
     int retval = 0;
 
     /* Remove the channel from the client -> channels hash table */
-    // 将频道 channel 从 client->channels 字典中移除
+    // 将频道 channel 从 client->channels set 中移除
     incrRefCount(channel); /* channel may be just a pointer to the same object
                             we have in the hash tables. Protect it... */
     // 示意图：
@@ -152,7 +155,7 @@ int pubsubUnsubscribeChannel(redisClient *c, robj *channel, int notify) {
 
         retval = 1;
         /* Remove the client from the channel -> clients list hash table */
-        // 从 channel->clients 的 clients 链表中，移除 client 
+        // 从 server.pubsub_channels->clients 的 client-list 中，移除本 client 
         // 示意图：
         // before:
         // {
@@ -190,6 +193,8 @@ int pubsubUnsubscribeChannel(redisClient *c, robj *channel, int notify) {
 
     /* Notify the client */
     // 回复客户端
+    // 进入这个 if 分支，一般是客户端依然存在，并没有退出
+    // 所以采用通知这个 redis-cli
     if (notify) {
         addReply(c,shared.mbulkhdr[3]);
         // "ubsubscribe" 字符串
@@ -207,7 +212,8 @@ int pubsubUnsubscribeChannel(redisClient *c, robj *channel, int notify) {
     return retval;
 }
 
-/* Subscribe a client to a pattern. Returns 1 if the operation succeeded, or 0 if the client was already subscribed to that pattern. 
+/* Subscribe a client to a pattern. Returns 1 if the operation succeeded,
+ * or 0 if the client was already subscribed to that pattern.
  *
  * 设置客户端 c 订阅模式 pattern 。
  *
@@ -218,7 +224,9 @@ int pubsubSubscribePattern(redisClient *c, robj *pattern) {
 
     // 在链表中查找模式，看客户端是否已经订阅了这个模式
     // 这里为什么不像 channel 那样，用字典来进行检测呢？
-    // 虽然 pattern 的数量一般来说并不多
+    // 在 push 的时候，你总是要在所有 pattern 里面，检查这个 channel 是否 match 的
+    // 所以采用 list 更好（参考 pubsubPublishMessage()）
+    // dict 浪费空间，而且还没有办法避免遍历的问题
     if (listSearchKey(c->pubsub_patterns,pattern) == NULL) {
         
         // 如果没有的话，执行以下代码
@@ -411,8 +419,8 @@ int pubsubPublishMessage(robj *channel, robj *message) {
             // 回复客户端。
             // 示例：
             // 1) "message"
-            // 2) "xxx"
-            // 3) "hello"
+            // 2) "channel-name"
+            // 3) "message-string"
             addReply(c,shared.mbulkhdr[3]);
             // "message" 字符串
             addReply(c,shared.messagebulk);
@@ -440,6 +448,7 @@ int pubsubPublishMessage(robj *channel, robj *message) {
 
             // 如果 channel 和 pattern 匹配
             // 就给所有订阅该 pattern 的客户端发送消息
+            // 这个匹配本身就是 O(n) 的复杂度，而且里面类似正则的匹配也很花时间，所以不建议有太多这样的 pattern channel
             if (stringmatchlen((char*)pat->pattern->ptr,
                                 sdslen(pat->pattern->ptr),
                                 (char*)channel->ptr,
@@ -472,7 +481,52 @@ int pubsubPublishMessage(robj *channel, robj *message) {
 /*-----------------------------------------------------------------------------
  * Pubsub commands implementation
  *----------------------------------------------------------------------------*/
-
+/**
+ * A message is **a Array reply** with three elements.
+ * There are three kind of message:
+ *   1) subscribe: means that we successfully subscribed to the channel given as
+ *      the second element in the reply. The third argument represents the number 
+ *      of channels we are currently subscribed to.
+ *   EXAMPLE:
+ *       127.0.0.1:6379> SUBSCRIBE msg-channel aimer-channel
+ *       Reading messages... (press Ctrl-C to quit)
+ *       1) "subscribe"
+ *       2) "msg-channel"
+ *       3) (integer) 1
+ *       1) "subscribe"
+ *       2) "aimer-channel"
+ *       3) (integer) 2
+ *   RESP format:
+ *       *3\r\n
+ *         $9\r\nsubscribe\r\n
+ *         $11\r\nmsg-channel\r\n
+ *         :1\r\n
+ *       *3\r\n
+ *         $9\r\nsubscribe\r\n
+ *         $13\r\naimer-channel\r\n
+ *         :2\r\n
+ * 
+ *   2) unsubscribe: means that we successfully unsubscribed from the channel
+ *      given as second element in the reply. The third argument represents the
+ *      number of channels we are currently subscribed to. When the last argument
+ *      is zero, we are no longer subscribed to any channel, and the client can
+ *      issue any kind of Redis command as we are outside the Pub/Sub state.
+ *   EXAMPLE:
+ *       127.0.0.1:6379> UNSUBSCRIBE  msg-channel
+ *       1) "unsubscribe"
+ *       2) "msg-channel"
+ *       3) (integer) 0
+ *
+ *   3) message: it is a message received as result of a PUBLISH command issued
+ *      by another client. The second element is the name of the originating
+ *      channel, and the third argument is the actual message payload.
+ *   EXAMPLE:
+ *       1) "message"
+ *       2) "msg-channel"
+ *       3) "chelly"
+*/
+// Pub/Sub has no relation to the key space. It was made to not interfere(干扰)
+// with it on any level, including database numbers.(e.g. Publishing on db 10, will be heard by a subscriber on db 1.)
 void subscribeCommand(redisClient *c) {
     int j;
 
@@ -491,6 +545,8 @@ void unsubscribeCommand(redisClient *c) {
     }
 }
 
+// psubscribeCommand、subscribeCommand 都匹配到了同一个 channel，redis-cli 其实这时候是会分别收到两个 pub 的
+// 分别来自 psubscribeCommand、subscribeCommand 所订阅的 channel
 void psubscribeCommand(redisClient *c) {
     int j;
 
@@ -511,7 +567,7 @@ void punsubscribeCommand(redisClient *c) {
 
 void publishCommand(redisClient *c) {
 
-    int receivers = pubsubPublishMessage(c->argv[1],c->argv[2]);
+    int receivers = pubsubPublishMessage(c->argv[1],c->argv[2]);    // channel-name, message
     if (server.cluster_enabled)
         clusterPropagatePublish(c->argv[1],c->argv[2]);
     else

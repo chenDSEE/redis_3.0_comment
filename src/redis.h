@@ -738,17 +738,24 @@ typedef struct redisClient {
 
     // 被监视的键
     list *watched_keys;     /* Keys WATCHED for MULTI/EXEC CAS */
+    sds peerid;             /* Cached peer ID. */
 
-    // 这个字典记录了客户端所有订阅的频道
-    // 键为频道名字，值为 NULL
+//==============================================================================
+    // TODO:(DONE) 这个 channel 的 dict 存放在 redisClient 干嘛？总不可能每一个 redisClient 的 pubsub 一更新就要全部更新吧？
+    // redisClient->pubsub_channels 仅仅是作为一个 set 来进行去重使用
+    // server->pubsub_channels 这里的才是真正作为 pubsub 查询用的 dict，key->channel, value->client-list;
+    // 这样就能采用 O(1) 的方式来进行 pubsub 了
+    /* pubsub 相关 */
+    // 这个字典记录了本客户端所有订阅的频道
+    // key --> channel name，value --> NULL
     // 也即是，一个频道的集合
     dict *pubsub_channels;  /* channels a client is interested in (SUBSCRIBE) */
 
     // 链表，包含多个 pubsubPattern 结构
-    // 记录了所有订阅频道的客户端的信息
+    // 由于 patterns 方式订阅的 channel 并不会太多（需要使用者自己克制，所以直接采用 list 管理）
+    // 再者，因为是 pattern 的关系，必然是要检查所有 pattern 是否匹配的，所以采用 list
     // 新 pubsubPattern 结构总是被添加到表尾
     list *pubsub_patterns;  /* patterns a client is interested in (SUBSCRIBE) */
-    sds peerid;             /* Cached peer ID. */
 
 //==============================================================================
     /* Response buffer */

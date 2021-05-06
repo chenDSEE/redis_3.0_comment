@@ -70,14 +70,14 @@ struct _rio {
     /* Backend-specific vars. */
     union {
 
-        struct {
+        struct {    // buffer 专用
             // 缓存指针
             sds ptr;
             // 偏移量
             off_t pos;
         } buffer;
 
-        struct {
+        struct {    // file 专用
             // 被打开文件的指针
             FILE *fp;
             // 最近一次 fsync() 以来，写入的字节量
@@ -95,7 +95,7 @@ typedef struct _rio rio;
  * if needed. */
 
 /*
- * 将 buf 中的 len 字节写入到 r 中。
+ * 将 buf 中的 len 字节写入到 r 中（这里的 rio r，其实就是向 disk 里面的一个真正文件写入）。
  *
  * 写入成功返回实际写入的字节数，写入失败返回 -1 。
  */
