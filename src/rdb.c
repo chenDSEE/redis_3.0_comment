@@ -49,6 +49,72 @@
  * This method allows Redis to benefit from copy-on-write semantics.
 */
 
+/**
+ * RDB 文件格式说明
+ * https://github.com/sripathikrishnan/redis-rdb-tools/wiki/Redis-RDB-Dump-File-Format?_ga=2.107651778.1109941721.1619662407-2136196162.1611909426
+ * 
+ * At a high level, the RDB file has the following structure:
+ * 
+ *   ----------------------------# RDB is a binary format. There are no new lines or spaces in the file.
+ *   52 45 44 49 53              # Magic String "REDIS"
+ *   30 30 30 37                 # 4 digit ASCCII RDB Version Number. In this case, version = "0007" = 7
+ *   ----------------------------
+ *   FE 00                       # FE = code that indicates database selector.(基本上是作为了保留字段，TODO: 怎么确保二进制安全？) db number = 00
+ *   ----------------------------# Key-Value pair starts
+ *   FD $unsigned int            # FD indicates "expiry time in seconds". After that, expiry time is read as a 4 byte unsigned int
+ *   $value-type                 # 1 byte flag indicating the type of value - set, map, sorted set etc.
+ *   $string-encoded-key         # The key, encoded as a redis string
+ *   $encoded-value              # The value. Encoding depends on $value-type
+ *   ----------------------------
+ *   FC $unsigned long           # FC indicates "expiry time in ms". After that, expiry time is read as a 8 byte unsigned long
+ *   $value-type                 # 1 byte flag indicating the type of value - set, map, sorted set etc.
+ *   $string-encoded-key         # The key, encoded as a redis string
+ *   $encoded-value              # The value. Encoding depends on $value-type
+ *   ----------------------------
+ *   $value-type                 # This key value pair doesn't have an expiry. $value_type guaranteed != to FD, FC, FE and FF
+ *   $string-encoded-key
+ *   $encoded-value
+ *   ----------------------------
+ *   FE $length-encoding         # Previous db ends, next db starts. Database number read using length encoding.
+ *   ----------------------------
+ *   ...                         # Key value pairs for this database, additonal database
+ *                               
+ *   FF                          ## End of RDB file indicator
+ *   8 byte checksum             ## CRC 64 checksum of the entire file.
+ * 
+ * 
+ * 说明：
+ * 1. Each key value pair has 4 parts:
+ *    1) Key Expiry Timestamp. This is optional
+ *    2) One byte flag indicating the value type
+ *    3) The key, encoded as a Redis String. See "Redis String Encoding"
+ *    4) The value, encoded according to the value type. See "Redis Value Encoding"
+ * 
+ * 2. $value-type:
+ *    #define REDIS_RDB_TYPE_STRING 0
+ *    #define REDIS_RDB_TYPE_LIST   1
+ *    #define REDIS_RDB_TYPE_SET    2
+ *    #define REDIS_RDB_TYPE_ZSET   3
+ *    #define REDIS_RDB_TYPE_HASH   4
+ *    #define REDIS_RDB_TYPE_HASH_ZIPMAP    9
+ *    #define REDIS_RDB_TYPE_LIST_ZIPLIST  10
+ *    #define REDIS_RDB_TYPE_SET_INTSET    11
+ *    #define REDIS_RDB_TYPE_ZSET_ZIPLIST  12
+ *    #define REDIS_RDB_TYPE_HASH_ZIPLIST  13
+ * 
+ * 3. $encoded-value, The encoding of the value depends on the value type flag.
+ *    1) When value type = 0, the value is a simple string.
+ *    2) When value type is one of 9, 10, 11 or 12, the value is wrapped in a string.
+ *       After reading the string, it must be parsed further.
+ *       底层实现类
+ *    3) When value type is one of 1, 2, 3 or 4, the value is a sequence of strings.
+ *       This sequence of strings is used to construct a list, set, sorted set or hashmap.（顶层抽象对象）
+ *       顶层抽象类
+ * 
+ * 4. $string-encoded-key, always is a string
+ * 
+ */
+
 /*
  * 将长度为 len 的字符数组 p 写入到 rdb 中。
  *
@@ -956,7 +1022,7 @@ int rdbSave(char *filename) {
     // 初始化 I/O
     rioInitWithFile(&rdb,fp);
 
-    // 设置校验和函数
+    // 设置校验和函数(默认开启)
     if (server.rdb_checksum)
         rdb.update_cksum = rioGenericUpdateChecksum;
 
@@ -988,7 +1054,7 @@ int rdbSave(char *filename) {
          * 写入 DB 选择器
          */
         if (rdbSaveType(&rdb,REDIS_RDB_OPCODE_SELECTDB) == -1) goto werr;
-        if (rdbSaveLen(&rdb,j) == -1) goto werr;
+        if (rdbSaveLen(&rdb,j) == -1) goto werr;    // 写入数据库编号
 
         /* Iterate this DB writing every entry 
          *
@@ -999,7 +1065,7 @@ int rdbSave(char *filename) {
             robj key, *o = dictGetVal(de);
             long long expire;
             
-            // 根据 keystr ，在栈中创建一个 key 对象
+            // 根据 keystr ，在栈中 init key 对象为 string 类型的 robj
             initStaticStringObject(key,keystr);
 
             // 获取键的过期时间
@@ -1624,6 +1690,7 @@ void rdbLoadProgressCallback(rio *r, const void *buf, size_t len) {
 /*
  * 将给定 rdb 中保存的数据载入到数据库中。
  */
+// TODO: 看一下用来进行重新同步的 RDB 过程（AOF、replication 之后）
 int rdbLoad(char *filename) {
     uint32_t dbid;
     int type, rdbver;
@@ -1640,6 +1707,7 @@ int rdbLoad(char *filename) {
     rioInitWithFile(&rdb,fp);
     rdb.update_cksum = rdbLoadProgressCallback;
     rdb.max_processing_chunk = server.loading_process_events_interval_bytes;
+    // 目前 offset 位于 rdb_file 的开头，只读取 version 的信息的前 9 byte，作为 RDB 文件的可用性检查
     if (rioRead(&rdb,buf,9) == 0) goto eoferr;
     buf[9] = '\0';
 
@@ -1660,12 +1728,21 @@ int rdbLoad(char *filename) {
 
     // 将服务器状态调整到开始载入状态
     startLoading(fp);
-    while(1) {
+    /**
+     * while(1) {
+     *     1. 读取 type
+     *     2. 根据 type 选择解析方式，并读取单个 key-value(item) 的 length + encoding
+     *     3. 读取 key-value
+     *     4. 存进本进程中的内存中
+     *     5. 重复 1234，读取 RDB 文件中下一个 item
+     * }
+    */
+    while(1) {  // 利用 while-loop 将整个 RDB 文件彻底读取完毕
         robj *key, *val;
         expiretime = -1;
 
-        /* Read type. 
-         *
+        /* Read type. */
+        /*
          * 读入类型指示，决定该如何读入之后跟着的数据。
          *
          * 这个指示可以是 rdb.h 中定义的所有以
@@ -1707,11 +1784,11 @@ int rdbLoad(char *filename) {
             if ((type = rdbLoadType(&rdb)) == -1) goto eoferr;
         }
             
-        // 读入数据 EOF （不是 rdb 文件的 EOF）
+        // 读入数据 REDIS_RDB_OPCODE_EOF （不是 rdb 文件的 EOF）
         if (type == REDIS_RDB_OPCODE_EOF)
             break;
 
-        /* Handle SELECT DB opcode as a special case 
+        /* Handle SELECT DB operator-code as a special case 
          *
          * 读入切换数据库指示
          */
@@ -1734,14 +1811,14 @@ int rdbLoad(char *filename) {
             continue;
         }
 
-        /* Read key 
-         *
+        /* Read key */
+        /*
          * 读入键
          */
         if ((key = rdbLoadStringObject(&rdb)) == NULL) goto eoferr;
 
-        /* Read value 
-         *
+        /* Read value */
+        /*
          * 读入值
          */
         if ((val = rdbLoadObject(type,&rdb)) == NULL) goto eoferr;
@@ -1761,6 +1838,13 @@ int rdbLoad(char *filename) {
             // 跳过
             continue;
         }
+        /*
+        else {
+            // 本节点作为从节点，则需要忠实地将过期的 key 也加载进来从节点中
+            // 判断 key 是否过期，并删除掉，这是 master 的任务
+            // 从节点需要做的是：忠实的加载 RDB 里面有的数据（这是 Redis 作者们的约定）
+        }
+        */
 
         /* Add the new object in the hash table 
          *
@@ -1775,7 +1859,7 @@ int rdbLoad(char *filename) {
         if (expiretime != -1) setExpire(db,key,expiretime);
 
         decrRefCount(key);
-    }
+    }   // end of while(1)
 
     /* Verify the checksum if RDB version is >= 5 
      *
@@ -1850,6 +1934,7 @@ void backgroundSaveDoneHandler(int exitcode, int bysignal) {
     /* Possibly there are slaves waiting for a BGSAVE in order to be served
      * (the first stage of SYNC is a bulk transfer of dump.rdb) */
     // 处理正在等待 BGSAVE 完成的那些 slave
+    // TODO: 看完主从再来看
     updateSlavesWaitingBgsave(exitcode == 0 ? REDIS_OK : REDIS_ERR);
 }
 

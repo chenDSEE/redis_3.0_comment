@@ -272,6 +272,7 @@ int _dictInit(dict *d, dictType *type,
  * T = O(N)
  */
 // 能否调用的判断标准 htNeedsResize()
+// updateDictResizePolicy() 将会改变相应的 rehash 开关
 int dictResize(dict *d)
 {
     int minimal;

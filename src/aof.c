@@ -66,6 +66,15 @@ void aofUpdateCurrentSize(void);
  *
  * ------------------------------------------------------------------------- */
 
+/**
+ * When the AOF fsync policy is set to always or everysec, and a background
+ * saving process (a background save or AOF log background rewriting) is
+ * performing a lot of I/O against the disk, in some Linux configurations
+ * Redis may block too long on the fsync() call. Note that there is no fix for
+ * this currently, as even performing fsync in a different thread will block
+ * our synchronous write(2) call.
+*/
+
 // 每个缓存块的大小
 #define AOF_RW_BUF_BLOCK_SIZE (1024*1024*10)    /* 10 MB per block */
 

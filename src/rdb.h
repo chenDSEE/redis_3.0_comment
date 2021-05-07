@@ -120,13 +120,13 @@
  *
  * 数据库特殊操作标识符
  */
-// 以 MS 计算的过期时间
+// (0xFC), 以 MS 计算的过期时间
 #define REDIS_RDB_OPCODE_EXPIRETIME_MS 252
-// 以秒计算的过期时间
+// (0xFD), 以秒计算的过期时间
 #define REDIS_RDB_OPCODE_EXPIRETIME 253
-// 选择数据库
+// (0xFE), 选择数据库
 #define REDIS_RDB_OPCODE_SELECTDB   254
-// 数据库的结尾（但不是 RDB 文件的结尾）
+// (0xFF), 数据库的结尾（但不是 RDB 文件的结尾）
 #define REDIS_RDB_OPCODE_EOF        255
 
 int rdbSaveType(rio *rdb, unsigned char type);

@@ -1422,6 +1422,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     // 对数据库执行各种操作
     databasesCron();
 
+    // TODO: 看完 RDB 跟 AOF 之后，看这里
     /* Start a scheduled AOF rewrite if this was requested by the user while
      * a BGSAVE was in progress. */
     // 如果 BGSAVE 和 BGREWRITEAOF 都没有在执行
@@ -1435,14 +1436,23 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     /* Check if a background saving or AOF rewrite in progress terminated. */
     // 检查 BGSAVE 或者 BGREWRITEAOF 是否已经执行完毕
     if (server.rdb_child_pid != -1 || server.aof_child_pid != -1) {
+        /* 通过定时器来检查进行 RDB 的子进程是否退出、退出状态码、退出信号来观测：子进程的 RDB 工作是否正常完成 */
         int statloc;
         pid_t pid;
 
         // 接收子进程发来的信号，非阻塞
+        // meaning wait for any child process whose process group ID is equal to the absolute value of this main thread.
+        // WNOHANG: return immediately if no child has exited.(非阻塞查询)
+        // statloc: 取出的相应状态就在这里，然后通过宏去一个个 check
+        // RETURN VALUE(pid): on success, returns the process ID of the child whose state has changed
         if ((pid = wait3(&statloc,WNOHANG,NULL)) != 0) {
-            int exitcode = WEXITSTATUS(statloc);
+            int exitcode = WEXITSTATUS(statloc);    // returns the exit status of the child.
             int bysignal = 0;
             
+            // WIFSIGNALED: returns true if the child process was terminated by a signal.
+            // WTERMSIG: returns the number of the signal that caused the child process to terminate.
+            // 取得将 child 终止掉的 signal
+            // 当 BGSAVE 正常结束的时候，bysignal 理应为 0。出了意外才是非零
             if (WIFSIGNALED(statloc)) bysignal = WTERMSIG(statloc);
 
             // BGSAVE 执行完毕

@@ -1076,7 +1076,7 @@ struct redisServer {
     // MIGRATE 缓存
     dict *migrate_cached_sockets;/* MIGRATE cached sockets */
 
-
+//===========================================================
     /* RDB / AOF loading information */
 
     // 这个值为真时，表示服务器正在进行载入
@@ -1091,6 +1091,7 @@ struct redisServer {
     // 开始进行载入的时间
     time_t loading_start_time;
     off_t loading_process_events_interval_bytes;
+//===========================================================
 
     /* Fast pointers to often looked up command */
     // 常用命令的快捷连接
@@ -1125,6 +1126,7 @@ struct redisServer {
     size_t stat_peak_memory;        /* Max used memory record */
 
     // 最后一次执行 fork() 时消耗的时间
+    // 仅仅是作为记录，能够通过 redis-cli 查看，作为 debug 性能的依据之一
     long long stat_fork_time;       /* Time needed to perform latest fork() */
 
     // 服务器因为客户端数量过多而拒绝客户端连接的次数
@@ -1185,7 +1187,7 @@ struct redisServer {
     // 每个代表一类客户端：普通、从服务器、pubsub，诸如此类
     clientBufferLimitsConfig client_obuf_limits[REDIS_CLIENT_LIMIT_NUM_CLASSES];
 
-
+//==============================================================================
     /* AOF persistence */
 
     // AOF 状态（开启/关闭/可写）
@@ -1242,7 +1244,9 @@ struct redisServer {
     int aof_last_write_errno;       /* Valid if aof_last_write_status is ERR */
     /* RDB persistence */
 
+    // dirty、dirty_before_bgsave 的配合使用，可以得出：还有多少个数据操作是没有被持久化至硬盘上的
     // 自从上次 SAVE 执行以来，数据库被修改的次数
+    // TODO: 这个 dirty 仅仅是记录一下脏数据的数量？没有在哪里用来进行判断啥的（例如 AOF，RDB 追加）
     long long dirty;                /* Changes to DB from the last save */
 
     // BGSAVE 执行前的数据库被修改次数
