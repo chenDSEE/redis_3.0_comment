@@ -2417,7 +2417,7 @@ int clientsArePaused(void) {
  * write, close sequence needed to serve a client.
  *
  * The function returns the total number of events processed. */
-// 让服务器在被阻塞的情况下，仍然处理某些事件。
+// 让服务器在被阻塞的情况下，仍然处理某些事件。例如重新载入 AOF
 // TODO: 看完主从之后看这个
 int processEventsWhileBlocked(void) {
     int iterations = 4; /* See the function top-comment. */

@@ -1422,14 +1422,16 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     // 对数据库执行各种操作
     databasesCron();
 
-    // TODO: 看完 RDB 跟 AOF 之后，看这里
     /* Start a scheduled AOF rewrite if this was requested by the user while
      * a BGSAVE was in progress. */
     // 如果 BGSAVE 和 BGREWRITEAOF 都没有在执行
-    // 并且有一个 BGREWRITEAOF 在等待，那么执行 BGREWRITEAOF
+    // 并且有一个 BGREWRITEAOF 在等待，那么执行 BGREWRITEAOF（相当于异步延迟执行）
     if (server.rdb_child_pid == -1 && server.aof_child_pid == -1 &&
         server.aof_rewrite_scheduled)
     {
+        // 有两种情况：
+        // 1. 准备执行 BGREWRITEAOF 的时候，发现正在进行 RDB（会竞争 IO，损耗速度）
+        // 2. 父进程 backgroundRewriteDoneHandler() 进行收尾工作的时候发生了异常
         rewriteAppendOnlyFileBackground();
     }
 
@@ -1455,6 +1457,9 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
             // 当 BGSAVE 正常结束的时候，bysignal 理应为 0。出了意外才是非零
             if (WIFSIGNALED(statloc)) bysignal = WTERMSIG(statloc);
 
+            // RDB、rewrite-AOF 的上半部分过程都是在子进程里面完成的
+            // 当子进程完成了相应的任务之后，将会退出，并将退出码返回给父进程
+            // 当父进程周期性检查中，发现：子进程退出了，那就会开始完成下半部分工作（状态机的改变呀，善后处理呀，buf 的刷写呀）
             // BGSAVE 执行完毕
             if (pid == server.rdb_child_pid) {
                 backgroundSaveDoneHandler(exitcode,bysignal);
@@ -1474,7 +1479,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 
         /* If there is not a background saving/rewrite in progress check if
          * we have to save/rewrite now */
-        // 既然没有 BGSAVE 或者 BGREWRITEAOF 在执行，那么检查是否需要执行它们
+        // 既然没有 BGSAVE 或者 BGREWRITEAOF 在执行，那么检查是否需要执行它们(根据策略，自动备份)
 
         // 遍历所有保存条件，看是否需要执行 BGSAVE 命令
          for (j = 0; j < server.saveparamslen; j++) {
@@ -1533,6 +1538,8 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * clear the AOF error in case of success to make the DB writable again,
      * however to try every second is enough in case of 'hz' is set to
      * an higher frequency. */
+    // TODO:(DONE) 既然都有了 server-cron，为什么还要这个周期性的 run 呢？
+    // 上面的是 aof-fsync 被推迟了，所以看看要不要立即进行，而且这是当上一次 error 的时候，才执行的补救方案
     run_with_period(1000) {
         if (server.aof_last_write_status == REDIS_ERR)
             flushAppendOnlyFile(0);
@@ -1578,7 +1585,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
 /* This function gets called every time Redis is entering the
  * main loop of the event driven library, that is, before to sleep
  * for ready file descriptors. */
-// 每次处理事件之前执行
+// 每次处理事件完成之后执行一次，然后 goto event-loop and sleep 
 void beforeSleep(struct aeEventLoop *eventLoop) {
     REDIS_NOTUSED(eventLoop);
 
@@ -3957,6 +3964,7 @@ void redisSetProcTitle(char *title) {
     if (server.cluster_enabled) server_mode = " [cluster]";
     else if (server.sentinel_mode) server_mode = " [sentinel]";
 
+    // 通常会 rename 为：redis-aof-rewrite *:6379
     setproctitle("%s %s:%d%s",
         title,
         server.bindaddr_count ? server.bindaddr[0] : "*",

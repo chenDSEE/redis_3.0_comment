@@ -4,8 +4,6 @@
  *
  * This file implements operations that we need to perform in the background.
  *
- * bio 实现了将工作放在后台执行的功能。
- *
  * Currently there is only a single operation, that is a background close(2)
  * system call. This is needed as when the process is the last owner of a
  * reference to a file closing it means unlinking it, and the deletion of the
@@ -86,12 +84,30 @@
 #include "redis.h"
 #include "bio.h"
 
+/**
+ *   (gdb) info thread（创建了两个线程）
+ *     Id   Target Id                                         Frame 
+ *   * 1    Thread 0x7f20b533bbc0 (LWP 667674) "redis-server" 0x00007f20b46bb257 in epoll_wait () from /lib64/libc.so.6
+ *     2    Thread 0x7f20b37ff700 (LWP 667675) "redis-server" 0x00007f20b498f2fc in pthread_cond_wait@@GLIBC_2.3.2 () from /lib64/libpthread.so.0
+ *     3    Thread 0x7f20b2ffe700 (LWP 667676) "redis-server" 0x00007f20b498f2fc in pthread_cond_wait@@GLIBC_2.3.2 () from /lib64/libpthread.so.0
+ *   (gdb) t 2
+ *   [Switching to thread 2 (Thread 0x7f20b37ff700 (LWP 667675))]
+ *   #0  0x00007f20b498f2fc in pthread_cond_wait@@GLIBC_2.3.2 () from /lib64/libpthread.so.0
+ *   (gdb) bt
+ *   #0  0x00007f20b498f2fc in pthread_cond_wait@@GLIBC_2.3.2 () from /lib64/libpthread.so.0
+ *   #1  0x0000000000456d66 in bioProcessBackgroundJobs (arg=0x0) at bio.c:231              <----- 看
+ *   #2  0x00007f20b498914a in start_thread () from /lib64/libpthread.so.0
+ *   #3  0x00007f20b46baf23 in clone () from /lib64/libc.so.6
+ *   (gdb) 
+*/
+
+
 // 工作线程，斥互和条件变量
 static pthread_t bio_threads[REDIS_BIO_NUM_OPS];
 static pthread_mutex_t bio_mutex[REDIS_BIO_NUM_OPS];
 static pthread_cond_t bio_condvar[REDIS_BIO_NUM_OPS];
 
-// 存放工作的队列
+// 存放工作的队列（每一种 jobs 都有一个专门的线程负责，index 实际上就是各种不同 job 的编号）
 static list *bio_jobs[REDIS_BIO_NUM_OPS];
 
 /* The following array is used to hold the number of pending jobs for every

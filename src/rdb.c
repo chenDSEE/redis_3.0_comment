@@ -1183,6 +1183,9 @@ int rdbSaveBackground(char *filename) {
 
         // 向父进程发送信号
         exitFromChild((retval == REDIS_OK) ? 0 : 1);
+        // 剩下的过程需要在父进程中完成，在 redis.c:serverCron()
+        // 父进程周期性检查：子进程是否退出？退出的状态码是什么？
+        // 然后完成剩下的工作（转发到 backgroundSaveDoneHandler() 中完成）
 
     } else {
 

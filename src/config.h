@@ -77,6 +77,8 @@
 #endif
 
 /* Define aof_fsync to fdatasync() in Linux and fsync() for all the rest */
+// fdatasync() 可以避免修改 mtime、atime 之类的文件属性，性能高一些
+// 而且是 force-data-sync() 是一个阻塞的同步调用，直到完成了落盘才会从这个 sys-call 中返回
 #ifdef __linux__
 #define aof_fsync fdatasync
 #else

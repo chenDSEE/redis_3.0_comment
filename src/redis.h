@@ -342,6 +342,15 @@
 #define ZSKIPLIST_P 0.25      /* Skiplist P = 1/4 */
 
 /* Append only defines */
+/**
+ * 所谓的 AOF policy 是指：以怎样的频率进行落盘保存
+ * 1. always 也就是来一个 CMD, 就落盘保存一次，追求的是绝对的安全
+ *    不能够容忍任何的延迟，所以是让主线程来进行同步 fsync() 落盘保存的
+ * 2. every-second 是利用 buf，每秒钟落盘一次，保存过去一秒内的所有 CMD
+ *    本身能够容忍一定的延迟。所以让子线程进行 fsync() 落盘保存
+ * 3. no 不落盘
+*/
+// fsync() 会阻塞 write()，但是 fsync() 跟 write() 的调用都必然是原子完成的
 #define AOF_FSYNC_NO 0
 #define AOF_FSYNC_ALWAYS 1
 #define AOF_FSYNC_EVERYSEC 2
@@ -1201,6 +1210,7 @@ struct redisServer {
     off_t aof_rewrite_min_size;     /* the AOF file is at least N bytes. */
 
     // 最后一次执行 BGREWRITEAOF 时， AOF 文件的大小
+    // 用来让 radis-server 决定是否需要自动进行 AOF rewrite
     off_t aof_rewrite_base_size;    /* AOF size on latest startup or rewrite. */
 
     // AOF 文件的当前字节大小
@@ -1211,15 +1221,20 @@ struct redisServer {
     pid_t aof_child_pid;            /* PID if rewriting process */
 
     // AOF 重写缓存链表，链接着多个缓存块
+    // 缓存块是：struct aofrwblock，每一个 block 能够容纳 10 MB 的内容，
+    // 所有的 aof-rewirte-buf 都有这个链表进行管理
     list *aof_rewrite_buf_blocks;   /* Hold changes during an AOF rewrite. */
 
     // AOF 缓冲区
+    // 因为生成 AOF 记录跟 AOF 记录落盘，代码是分开的，所以要有个 heap buf 暂缓一下临时数据
+    // 利用 heap-buf 的方式共享\通信数据
     sds aof_buf;      /* AOF buffer, written before entering the event loop */
 
     // AOF 文件的描述符
     int aof_fd;       /* File descriptor of currently selected AOF file */
 
     // AOF 的当前目标数据库
+    // 当 redis-server 被使用了两个以上的不同 DB，将会非常有用
     int aof_selected_db; /* Currently selected DB in AOF */
 
     // 推迟 write 操作的时间
@@ -1242,11 +1257,34 @@ struct redisServer {
     int aof_rewrite_incremental_fsync;/* fsync incrementally while rewriting? */
     int aof_last_write_status;      /* REDIS_OK or REDIS_ERR */
     int aof_last_write_errno;       /* Valid if aof_last_write_status is ERR */
+    
+//==============================================================================
     /* RDB persistence */
 
     // dirty、dirty_before_bgsave 的配合使用，可以得出：还有多少个数据操作是没有被持久化至硬盘上的
     // 自从上次 SAVE 执行以来，数据库被修改的次数
-    // TODO: 这个 dirty 仅仅是记录一下脏数据的数量？没有在哪里用来进行判断啥的（例如 AOF，RDB 追加）
+    // TODO:(DONE) 这个 dirty 仅仅是记录一下脏数据的数量？没有在哪里用来进行判断啥的（例如 AOF，RDB 追加）
+    // 当然不止，参考 redis.c:call() 中：
+    // 只有数据库被修改过了（脏了），才会执行 AOF、repl 这些命令的传播
+    /*
+        // 如果数据库有被修改，那么启用 REPL 和 AOF 传播
+        if (dirty)
+            flags |= (REDIS_PROPAGATE_REPL | REDIS_PROPAGATE_AOF);
+    */
+    // TODO:(DONE) 既然如此，dirty 没有及时清零的话，岂不是一直会触发 AOF（哪怕是一个 get 命令）
+    // 当然不会，上面的 dirty 并不是 server.dirty，在执行前后，都会更新一次 dirty
+    // 这样就能够正确计算出：执行当前这个命令，有没有修改过数据库
+    /*
+        // 保留旧 dirty 计数器值
+        dirty = server.dirty;
+
+        // 执行实现函数
+        c->cmd->proc(c);
+
+        // 计算命令执行之后的 dirty 值
+        dirty = server.dirty-dirty;    
+    */
+    // TODO: 这个 dirty 什么时候会被清零？
     long long dirty;                /* Changes to DB from the last save */
 
     // BGSAVE 执行前的数据库被修改次数
