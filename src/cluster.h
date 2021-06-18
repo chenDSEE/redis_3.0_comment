@@ -267,19 +267,19 @@ typedef struct clusterState {
     mstime_t mf_end;            /* Manual failover time limit (ms unixtime).
                                    It is zero if there is no MF in progress. */
     /* Manual failover state of master. */
-    /* 主服务器的手动故障转移状态 */
+    /*  master 的手动故障转移状态 */
     clusterNode *mf_slave;      /* Slave performing the manual failover. */
     /* Manual failover state of slave. */
-    /* 从服务器的手动故障转移状态 */
+    /*  slave 的手动故障转移状态 */
     long long mf_master_offset; /* Master offset the slave needs to start MF
                                    or zero if stil not received. */
     // 指示手动故障转移是否可以开始的标志值
-    // 值为非 0 时表示各个主服务器可以开始投票
+    // 值为非 0 时表示各个 master 可以开始投票
     int mf_can_start;           /* If non-zero signal that the manual failover
                                    can start requesting masters vote. */
 
     /* The followign fields are uesd by masters to take state on elections. */
-    /* 以下这些域由主服务器使用，用于记录选举时的状态 */
+    /* 以下这些域由 master 使用，用于记录选举时的状态 */
 
     // 集群最后一次进行投票的纪元
     uint64_t lastVoteEpoch;     /* Epoch of the last vote granted. */

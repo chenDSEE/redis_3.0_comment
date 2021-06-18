@@ -131,6 +131,30 @@ int anetKeepAlive(char *err, int fd, int interval)
     return ANET_OK;
 }
 
+/**
+ * Nagle 算法，本质上就是 TCP_NODELAY 选项
+ * 1. 当 TCP_NODELAY 启用，那就意味着，禁用 Nagle 算法，使得 TCP socket 在接收端滑动窗口允许的情况下，
+ *    发送端可以尽可能发送数据，哪怕仅仅只有几个 byte（相当于每一次 write() 调用都发送一次 TCP packet，哪怕 write() 出现了 short write）
+ *    
+ * 2. 当 TCP_NODELAY 禁用，那就意味着，启用 Nagle 算法，使得 TCP socket 一定要等到上一次发送出去的 packet，
+ *    被接收端 ack 之后，才能继续发送下一个数据包；在不能发送数据包期间，接收端不停积累 write() 中的数据，
+ *    日后将多个 write() 中的数据放在同一个 TCP packet 里面（不超过 MSS 的前提下）
+ *   （TCP 是流式协议，网上那些小包举例本身就不符合流式协议的概念，TCP 是不存在什么把几个小的数据包合并在一起这样的概念的
+ *     比较正确的举例应该是：将多个独立的 http packet 合并在同一个 TCP packet 里面；
+ *                          将多次不同的 write() 调用中的内容，合并在同一个 TCP packet 发送出去）
+ * 
+ * 要是叠加上 delay-ack 的话，会有很恶心的延迟：
+ * 触发前提：发送端发送一个很大的东西；发送端在 delay 期间多次发起 write；
+ * 因为发送端要等待接收端的 ack，才能继续走；而 redis 是属于 req-resp 的交互方式的，
+ * 也就是说，一般情况下，接收端的 ack 都能够跟着接收端返回的操作结果（ERR\OK）一起回去发送端的。
+ * 
+ * 但是，要是这个 CMD 很长，TCP 不得不分片的话，所有事情都发生了变化：
+ * 发送端的一个完整 CMD 由两个 TCP packet 组成，第一个 TCP packet 并不能构成完整的 CMD，所以接收端也就不回 ERR\OK，
+ * 导致接收端的 ack 会有延时，所以发送端的下半部分 CMD 不得不等一下子。。。很无奈
+ * 
+ * 但是 CMD 不会令 TCP packet 分开的话，上面的问题将不存在
+*/
+
 /*
  * 打开或关闭 Nagle 算法
  */
@@ -275,6 +299,13 @@ static int anetTcpGenericConnect(char *err, char *addr, int port,
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
 
+    /* int getaddrinfo( const char *hostname, const char *service, const struct addrinfo *hints, struct addrinfo **result );
+     *
+     * getaddrinfo解决了把主机名（string）和服务名（string）转换成套接口地址结构的问题
+     * 可以导致返回多个 servinfo 结构的情形有以下2个：
+     * 1. 如果与 hostname 参数关联的地址有多个，那么适用于所请求地址簇的每个地址都返回一个对应的结构。
+     * 2. 如果 service 参数指定的服务支持多个套接口类型，那么每个套接口类型都可能返回一个对应的结构，具体取决于hints结构的ai_socktype成员。
+     */
     if ((rv = getaddrinfo(addr,portstr,&hints,&servinfo)) != 0) {
         anetSetError(err, "%s", gai_strerror(rv));
         return ANET_ERR;
@@ -329,12 +360,29 @@ error:
         s = ANET_ERR;
     }
 end:
+    // TODO:(DONE) 为什么在进行异步 connect 的时候，当发现没办法立即 connect 成功的话，就直接返回这个未知的 connect 呢？
+    /**
+     * man connect:
+     * EINPROGRESS
+     * The socket is nonblocking and the connection cannot be completed immediately.
+     * It is possible to select(2) or poll(2) for completion by selecting the socket for writing.
+     * After select(2) indicates writability, use getsockopt(2) to read the SO_ERROR option
+     * at level SOL_SOCKET to determine whether connect() completed successfully (SO_ERROR
+     * is zero) or unsuccessfully (SO_ERROR is one of the usual error codes listed here,
+     * explaining the reason for the failure).
+     * 
+     * 用 repl 的 master 建立过程来举例：
+     * 1. 这时候返回了一个 connect 结果未知的 socket-fd 给 slave，
+     * 2. 然后 slave 会不管三七二十一，直接把这个 socket-fd 加入 epoll-instance 里面去
+     * 3. 然后在 epoll-instance 通知的时候，调用 syncWithMaster()，这时候再来检查一下：这个 socket-fd 是不是可以用了，不是的话，得 close 掉，回收资源
+     * 4. 所以在 syncWithMaster() 里面必须要有这么一行代码：getsockopt(fd, SOL_SOCKET, SO_ERROR, &sockerr, &errlen)
+     */
     freeaddrinfo(servinfo);
     return s;
 }
 
 /*
- * 创建阻塞 TCP 连接
+ * 创建阻塞 TCP 连接（很遗憾，3.0 版本压根没用过这个）
  */
 int anetTcpConnect(char *err, char *addr, int port)
 {

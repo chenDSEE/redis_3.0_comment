@@ -159,7 +159,7 @@ redisClient *createClient(int fd) {
     c->repl_ack_off = 0;
     // 通过 ACK 命令接收到偏移量的时间
     c->repl_ack_time = 0;
-    // 客户端为从服务器时使用，记录了从服务器所使用的端口号
+    // 客户端为 slave 时使用，记录了 slave 所使用的端口号
     c->slave_listening_port = 0;
     // 回复链表
     c->reply = listCreate();
@@ -233,7 +233,7 @@ int prepareClientToWrite(redisClient *c) {
     // LUA 脚本环境所使用的伪客户端总是可写的
     if (c->flags & REDIS_LUA_CLIENT) return REDIS_OK;
     
-    // 客户端是主服务器并且不接受查询，
+    // 客户端是 master 并且不接受查询，
     // 那么它是不可写的，出错
     if ((c->flags & REDIS_MASTER) &&
         !(c->flags & REDIS_MASTER_FORCE_REPLY)) return REDIS_ERR;
@@ -843,9 +843,11 @@ void addReplyBulkLongLong(redisClient *c, long long ll) {
  * The function takes care of freeing the old output buffers of the
  * destination client. */
 // 释放 dst 客户端原有的输出内容，并将 src 客户端的输出内容复制给 dst
+// repl 进行 full sync 的时候，会通过这个函数，复用 RDB 跟相应的追加数据
 void copyClientOutputBuffer(redisClient *dst, redisClient *src) {
 
     // 释放 dst 原有的回复链表
+    // 无所谓，反正在做 full sync，扔了就扔了
     listRelease(dst->reply);
     // 复制新链表到 dst
     dst->reply = listDup(src->reply);
@@ -903,7 +905,7 @@ static void acceptCommonHandler(int fd, int flags) {
 
 /* 
  * 创建一个 TCP 连接处理器
- * 在向 epoll-instance 注册 listen-socket 的时候，相应的回调函数
+ * 在向 epoll-instance 注册 listen-socket 的时候，一同注册进去的回调函数
  */
 void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
     int cport, cfd, max = MAX_ACCEPTS_PER_CALL; // 避免长时间阻塞，甚至是 syn 攻击；反正 epoll-instance 也是 level-trigger
@@ -965,7 +967,8 @@ static void freeClientArgv(redisClient *c) {
 /* Close all the slaves connections. This is useful in chained replication
  * when we resync with our own master and want to force all our slaves to
  * resync with us as well. */
-// 断开所有从服务器的连接，强制所有从服务器执行重同步，TODO: 为什么能做到这种效果？
+// 断开所有 slave 的连接，强制所有 slave 执行重同步，TODO: 为什么能做到这种效果？
+// TODO: 要是 slave_1 的 slave_2 先跟 slave_1 连接上，然后 sync，这之后 slave_1 才跟 master 接上，会怎样？有没有 handle 这个 case？
 void disconnectSlaves(void) {
     while (listLength(server.slaves)) {
         listNode *ln = listFirst(server.slaves);
@@ -975,21 +978,22 @@ void disconnectSlaves(void) {
 
 /* This function is called when the slave lose the connection with the
  * master into an unexpected way. */
-// 这个函数在从服务器以外地和主服务器失去联系时调用
+// 这个函数在 slave 以外地和 master 失去联系时调用
+// TODO:（DONE） 多机功能看完之后，再看看这个，这个跟 PSYNC 过程有关
 void replicationHandleMasterDisconnection(void) {
     server.master = NULL;
-    server.repl_state = REDIS_REPL_CONNECT;
+    server.repl_state = REDIS_REPL_CONNECT; // 尝试 connect 的状态
     server.repl_down_since = server.unixtime;
-    /* We lost connection with our master, force our slaves to resync
+    /* We(we are a slave) lost connection with our master, force our slaves to resync
      * with us as well to load the new data set.
      *
-     * 和主服务器失联，强制所有这个服务器的从服务器 resync ，
+     * 和 master 失联，强制所有这个服务器的 slave  resync ，
      * 等待载入新数据。
      *
      * If server.masterhost is NULL the user called SLAVEOF NO ONE so
      * slave resync is not needed. 
      *
-     * 如果 masterhost 不存在（怎么会这样呢？）
+     * TODO:（DONE）如果 masterhost 不存在（怎么会这样呢？）有检查的，syncCommand() 最开头就检查了
      * 那么调用 SLAVEOF NO ONE ，避免 slave resync
      */
     if (server.masterhost != NULL) disconnectSlaves();
@@ -1010,12 +1014,15 @@ void freeClient(redisClient *c) {
      * Note that before doing this we make sure that the client is not in
      * some unexpected state, by checking its flags. */
     if (server.master && c->flags & REDIS_MASTER) {
+        // slave 才会进来这个分支
         redisLog(REDIS_WARNING,"Connection with master lost.");
         if (!(c->flags & (REDIS_CLOSE_AFTER_REPLY|
                           REDIS_CLOSE_ASAP|
                           REDIS_BLOCKED|
                           REDIS_UNBLOCKED)))
         {
+            // 这是为了避免 slave 跟 master 短暂失联后，必须 full sync 的局面
+            // 短暂失联，是可以采用 p sync 的
             replicationCacheMaster(c);
             return;
         }
@@ -1067,7 +1074,7 @@ void freeClient(redisClient *c) {
     freeClientArgv(c);
 
     /* Remove from the list of clients */
-    // 从服务器的客户端链表中删除自身
+    //  slave 的客户端链表中删除自身
     if (c->fd != -1) {
         ln = listSearchKey(server.clients,c);
         redisAssert(ln != NULL);
@@ -1155,6 +1162,9 @@ void freeClientsInAsyncFreeQueue(void) {
 
 /*
  * 负责传送命令回复的写处理器，将有 epoll-instance 进行监听调度，在就绪的情况下调用本函数，完成相应的 send 任务
+ * 
+ * 会尽可能的将 c->buf 里面需要发送，却被堆积的内容，全部发送给对应的 client（因为 write 不是立马就可以就绪的，
+ * 所以一般会采用这样的异步 write 方案，等到 fd 的 write 就绪之后，再把数据从 buf 里面，真正的 write 出去）
  */
 void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     redisClient *c = privdata;
@@ -1807,7 +1817,7 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
         sdsIncrLen(c->querybuf,nread);
         // 记录服务器和客户端最后一次互动的时间
         c->lastinteraction = server.unixtime;
-        // 如果客户端是 master 的话，更新它的复制偏移量
+        // 如果客户端是 master 的话(slave --> master 时用的 client)，更新它的复制偏移量
         if (c->flags & REDIS_MASTER) c->reploff += nread;
     } else {
         // 在 nread == -1 且 errno == EAGAIN 时运行
@@ -2173,7 +2183,7 @@ unsigned long getClientOutputBufferMemoryUsage(redisClient *c) {
  *                                    普通客户端
  *
  * REDIS_CLIENT_LIMIT_CLASS_SLAVE  -> Slave or client executing MONITOR command
- *                                    从服务器，或者正在执行 MONITOR 命令的客户端
+ *                                     slave ，或者正在执行 MONITOR 命令的客户端
  *
  * REDIS_CLIENT_LIMIT_CLASS_PUBSUB -> Client subscribed to Pub/Sub channels
  *                                    正在进行订阅操作（SUBSCRIBE/PSUBSCRIBE）的客户端
@@ -2330,7 +2340,7 @@ void asyncCloseClientOnOutputBufferLimitReached(redisClient *c) {
 /* Helper function used by freeMemoryIfNeeded() in order to flush slaves
  * output buffers without returning control to the event loop. */
 // freeMemoryIfNeeded() 函数的辅助函数，
-// 用于在不进入事件循环的情况下，冲洗所有从服务器的输出缓冲区。
+// 用于在不进入事件循环的情况下，冲洗所有 slave 的输出缓冲区。
 // TODO: 看完主从之后看这个
 void flushSlavesOutputBuffers(void) {
     listIter li;

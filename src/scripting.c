@@ -1332,7 +1332,7 @@ void evalGenericCommand(redisClient *c, int evalsha) {
      * flush our cache of scripts that can be replicated as EVALSHA, while
      * for AOF we need to do so every time we rewrite the AOF file. 
      *
-     * 每次有一个新的 slave 连上主服务器时，
+     * 每次有一个新的 slave 连上 master 时，
      * 或者每次进行 AOF 重写时，程序清空缓存字典
      */
     if (evalsha) {

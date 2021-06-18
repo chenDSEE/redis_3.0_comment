@@ -61,6 +61,10 @@ ssize_t syncWrite(int fd, char *ptr, ssize_t size, long long timeout) {
         nwritten = write(fd,ptr,size);
         if (nwritten == -1) {
             if (errno != EAGAIN) return -1;
+/*          else {  // 因为在非阻塞的情况下，EAGAIN 是很正常的，晚点重试一次就好了
+                do nothing
+            }
+*/
         } else {
             ptr += nwritten;
             size -= nwritten;
@@ -68,6 +72,11 @@ ssize_t syncWrite(int fd, char *ptr, ssize_t size, long long timeout) {
         if (size == 0) return ret;
 
         /* Wait */
+        // 到了这里，说明 fd 的 write-buff 是满的，写不了；或者发生了 short-write，只有一部分内容可以成功写入 fd 里面去
+        // 所以在 timeout 范围内进行同步等待（采用 poll-dispatch 进行调度）
+        // 那么也就会产生两种结果：
+        // 1. timeout，然后直接 return
+        // 2. 在 timeout 之前，fd 的 write-buff 可写，更新 remaining，然后再次尝试写入
         aeWait(fd,AE_WRITABLE,wait);
         elapsed = mstime() - start;
         if (elapsed >= timeout) {
@@ -128,7 +137,8 @@ ssize_t syncReadLine(int fd, char *ptr, ssize_t size, long long timeout) {
     size--;
     while(size) {
         char c;
-
+        
+        // 因为要解析格式，一个个 byte 进行读取解析是必不可少的，但是多次调用 read 实在是不需要
         if (syncRead(fd,&c,1,timeout) == -1) return -1;
         if (c == '\n') {
             *ptr = '\0';

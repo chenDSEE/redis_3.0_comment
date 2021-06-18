@@ -1098,6 +1098,9 @@ int rdbSave(char *filename) {
 
     /* Make sure data will not remain on the OS's output buffers */
     // 冲洗缓存，确保数据已写入磁盘
+    // fclose(RDB 里面常用，通过 fclose 来进行落盘) VS close(在 repl 里面用的多，因为是 redis 来定时 sync 的)
+    // fclose 内部隐含一个 flush，所以可以认为 fclose 之后的文件，就已经落盘了
+    // close 并不会 flush 进行落盘，所以是需要自己手动确保落盘的，否则部分数据可能会丢失
     if (fflush(fp) == EOF) goto werr;
     if (fsync(fileno(fp)) == -1) goto werr;
     if (fclose(fp) == EOF) goto werr;
@@ -1936,8 +1939,7 @@ void backgroundSaveDoneHandler(int exitcode, int bysignal) {
 
     /* Possibly there are slaves waiting for a BGSAVE in order to be served
      * (the first stage of SYNC is a bulk transfer of dump.rdb) */
-    // 处理正在等待 BGSAVE 完成的那些 slave
-    // TODO: 看完主从再来看
+    // 有正在等待 master 完成 RDB 进行同步的 slave，而且这个 BGSAVE CMD 很可能就是 slave 引发 master 执行的，处理这种情况
     updateSlavesWaitingBgsave(exitcode == 0 ? REDIS_OK : REDIS_ERR);
 }
 

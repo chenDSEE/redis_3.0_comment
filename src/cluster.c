@@ -3805,8 +3805,8 @@ void clusterCron(void) {
 
         /* If we are a master and one of the slaves requested a manual
          * failover, ping it continuously. */
-        // 如果这是一个主节点，并且有一个从服务器请求进行手动故障转移
-        // 那么向从服务器发送 PING 。
+        // 如果这是一个主节点，并且有一个 slave 请求进行手动故障转移
+        // 那么向 slave 发送 PING 。
         if (server.cluster->mf_end &&
             nodeIsMaster(myself) &&
             server.cluster->mf_slave == node &&
@@ -5507,7 +5507,7 @@ try_again:
             server.dirty++;
 
             /* Translate MIGRATE as DEL for replication/AOF. */
-            // 如果键被删除了的话，向 AOF 文件和从服务器/节点发送一个 DEL 命令
+            // 如果键被删除了的话，向 AOF 文件和 slave /节点发送一个 DEL 命令
             aux = createStringObject("DEL",3);
             rewriteClientCommandVector(c,2,aux,c->argv[3]);
             decrRefCount(aux);

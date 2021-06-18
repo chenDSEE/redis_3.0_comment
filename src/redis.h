@@ -299,11 +299,12 @@
 
 /* Slave replication state - from the point of view of the slave. */
 #define REDIS_REPL_NONE 0 /* No active replication */
-#define REDIS_REPL_CONNECT 1 /* Must connect to master */
-#define REDIS_REPL_CONNECTING 2 /* Connecting to master */
-#define REDIS_REPL_RECEIVE_PONG 3 /* Wait for PING reply */
-#define REDIS_REPL_TRANSFER 4 /* Receiving .rdb from master */
-#define REDIS_REPL_CONNECTED 5 /* Connected to master */
+#define REDIS_REPL_CONNECT 1 /* Must connect to master（想要连接，但是还没有连接） */
+// 增加一个 ping\pong 过程是为了确认 slave-master 之间确确实实能够传递数据，毕竟这个过程耗时可能很长的
+#define REDIS_REPL_CONNECTING 2 /* Connecting to master（正在连接，握手请求已经发送了） */
+#define REDIS_REPL_RECEIVE_PONG 3 /* Wait for PING reply（slave 已经发送 ping，正在等待 pong） */
+#define REDIS_REPL_TRANSFER 4 /* slave 正在等待 Receiving .rdb from master */
+#define REDIS_REPL_CONNECTED 5 /* Connected to master（成功连接） */
 
 /* Slave replication state - from the point of view of the master.
  * In SEND_BULK and ONLINE state the slave receives new updates
@@ -423,6 +424,7 @@
 /* Using the following macro you can run code inside serverCron() with the
  * specified period, specified in milliseconds.
  * The actual resolution depends on server.hz. */
+// 实际上这个周期性执行并不是很精确的，因为阻塞操作可能会带来延时
 #define run_with_period(_ms_) if ((_ms_ <= 1000/server.hz) || !(server.cronloops%((_ms_)/(1000/server.hz))))
 
 /* We can print the stacktrace, so our assert is defined this way: */
@@ -710,28 +712,33 @@ typedef struct redisClient {
     // 0 代表未认证， 1 代表已认证
     int authenticated;      /* when requirepass is non-NULL */
 
-    // 复制状态
+    // 复制状态(sync 时，master 使用的状态机)
     int replstate;          /* replication state if this is a slave */
-    // 用于保存主服务器传来的 RDB 文件的文件描述符
+    // master 上看：这个 fd 指向用来进行同步的那个 RDB 文件
     int repldbfd;           /* replication DB file descriptor */
 
-    // 读取主服务器传来的 RDB 文件的偏移量
+    // master 上看：记录正在传递的 RDB 文件传递 offset，因为面对体积较大的 RDB 文件。
+    // 是不可能一个 write 就完成了全部传送的；而传递 RDB 的工作是交由主进程来完成的，
+    // 所以主进程传递 RDB 的过程也是一个多次、异步的过程。
+    // 既然是异步，那必然是需要记录一下：这个 RDB 文件上一次传递到哪里，这便是 repldboff(repl_db_offset)
     off_t repldboff;        /* replication DB file offset */
-    // 主服务器传来的 RDB 文件的大小
+    // slave 上看：master 传来的 RDB 文件的大小
+    // master 上看：要向这个 slave 传递的 RDB 文件大小
     off_t repldbsize;       /* replication DB file size */
-    
-    sds replpreamble;       /* replication DB preamble. */
+    // repldbsize 的 SDS RESP 形式，如："$%31\r\n"；在传送 RDB 前，先告知 slave，即将传送的 RDB 究竟有多大
+    sds replpreamble;       /* replication DB preamble.(前缀，说明 RDB 文件的大小) */
 
-    // 主服务器的复制偏移量
+    // 在 slave 上才会用，当前这个 client 就是 slave --> master 的 client
+    // 这个 offset 就是 repl 到什么位置，这个是 master 的 buf offset
     long long reploff;      /* replication offset if this is our master */
-    // 从服务器最后一次发送 REPLCONF ACK 时的偏移量
+    //  slave 最后一次发送 REPLCONF ACK 时的偏移量
     long long repl_ack_off; /* replication ack offset, if this is a slave */
-    // 从服务器最后一次发送 REPLCONF ACK 的时间
+    //  slave 最后一次发送 REPLCONF ACK 的时间
     long long repl_ack_time;/* replication ack time, if this is a slave */
-    // 主服务器的 master run ID
+    //  master 的 master run ID
     // 保存在客户端，用于执行部分重同步
     char replrunid[REDIS_RUN_ID_SIZE+1]; /* master run id if this is a master */
-    // 从服务器的监听端口号
+    //  slave 的监听端口号
     int slave_listening_port; /* As configured with: SLAVECONF listening-port */
 
     // 事务状态
@@ -747,7 +754,7 @@ typedef struct redisClient {
 
     // 被监视的键
     list *watched_keys;     /* Keys WATCHED for MULTI/EXEC CAS */
-    sds peerid;             /* Cached peer ID. */
+    sds peerid;             /* Cached peer ID. format: ip:port or [ipv6]:port */
 
 //==============================================================================
     // TODO:(DONE) 这个 channel 的 dict 存放在 redisClient 干嘛？总不可能每一个 redisClient 的 pubsub 一更新就要全部更新吧？
@@ -1032,6 +1039,9 @@ struct redisServer {
     int cronloops;              /* Number of times the cron function run */
 
     // 本服务器的 RUN ID
+    // TODO:(DONE) 现在看起来，这个 runid 所谓的每次执行都不同，是指：每一个 redis-server 的 runid 都会是不一样的
+    // run id 是 2.8 版本之后，进行 replication 的核心标识之一；但是 4.0 版本之后，则是采用 repl-id
+    // Redis服务器的随机标识符(用于Sentinel和集群)，重启后会改变。当复制时发现和之前的run_id不同时（说明 master 发生了变化），将会对数据进行全量同步。
     char runid[REDIS_RUN_ID_SIZE+1];  /* ID always different at every exec. */
 
     // 服务器是否运行在 SENTINEL 模式
@@ -1070,7 +1080,7 @@ struct redisServer {
     // 链表，保存了所有待关闭的客户端，实现异步关闭（参考：freeClientAsync() 函数，加入；freeClientsInAsyncFreeQueue() 函数，释放）
     list *clients_to_close;     /* Clients to close asynchronously */
 
-    // 链表，保存了所有从服务器，以及所有监视器
+    // 链表，保存了所有 slave ，以及所有监视器
     list *slaves, *monitors;    /* List of slaves and MONITORs */
 
     // 服务器的当前客户端，仅用于崩溃报告
@@ -1193,7 +1203,7 @@ struct redisServer {
     int daemonize;                  /* True if running as a daemon */
     // 客户端输出缓冲区大小限制
     // 数组的元素有 REDIS_CLIENT_LIMIT_NUM_CLASSES 个
-    // 每个代表一类客户端：普通、从服务器、pubsub，诸如此类
+    // 每个代表一类客户端：普通、 slave 、pubsub，诸如此类
     clientBufferLimitsConfig client_obuf_limits[REDIS_CLIENT_LIMIT_NUM_CLASSES];
 
 //==============================================================================
@@ -1329,53 +1339,109 @@ struct redisServer {
 
     /* Replication (master) */
     int slaveseldb;                 /* Last SELECTed DB in replication output */
-    // 全局复制偏移量（一个累计值）
-    long long master_repl_offset;   /* Global replication offset */
-    // 主服务器发送 PING 的频率
+
+    //  master 发送 PING 的频率
     int repl_ping_slave_period;     /* Master pings the slave every N seconds */
 
-    // backlog 本身
+
+    // backlog 本身 
+    // TODO:(DONE) 环形缓冲？是的，环形，实际上就是条状，多了的从头开始覆盖罢了；
+    // 参考 feedReplicationBacklog()
     char *repl_backlog;             /* Replication backlog for partial syncs */
-    // backlog 的长度
+    // backlog 的长度，REDIS_DEFAULT_REPL_BACKLOG_SIZE 1 MB，这个的大小基本上是不会变的
     long long repl_backlog_size;    /* Backlog circular buffer size */
-    // backlog 中数据的长度
-    long long repl_backlog_histlen; /* Backlog actual data length */
-    // backlog 的当前索引
+    // 是记录下一次写入的时候，从哪里开始追加写入
     long long repl_backlog_idx;     /* Backlog circular buffer current offset */
+
+    // 实话说，这个一旦到达了 repl_backlog_size 之后，大小就不会变化了，一直都是 repl_backlog_size
+    // 相当于一个溢出标志位罢了
+    // 因为环形队列需要做到：
+    // 1. 被全部 slave ack 的数据，会被标记为可以覆盖；（实际上 redis 不会这样，因为这只是一个 PSYNC 的判断依据）
+    // 2. 还没有被 ack 的数据，依旧保留
+    // 为什么要有这个 histlen 呢？适配缓冲区还没有溢出的情况，溢出且开始覆盖之后，histlen 恒等于 repl_backlog_size
+    // 无论溢出与否，都是 backlog 里面的有效数据长度（预处之后，有效数据长度就固定为 repl_backlog_size 了）
+    long long repl_backlog_histlen; /* Backlog actual data length */
+
+    // **缓冲区中的数据，最开头那一位的版本号**
+    // backlog 的当前索引（范围是：0 -- repl_backlog_size）
     // backlog 中可以被还原的第一个字节的偏移量
+    /* Each master also takes an offset that increments for every byte of replication stream 
+     * that it is produced to be sent to replicas, in order to update the state of the replicas 
+     * with the new changes modifying the dataset. The replication offset is incremented
+     * even if no replica is actually connected
+     * 
+     * **Identifies an exact version of the dataset of a master.**
+     */
     long long repl_backlog_off;     /* Replication offset of first byte in the
                                        backlog buffer. */
+    // 全局复制偏移量（一个累计值），作为 master 的 redis-server 负责记录
+    /* master 在 handle 完每一个 CMD 之后，就会根据 repl 的开关，看看要不要进行 CMD 的 repl 传播
+     * 需要且 DB dirty 之后，就会在 cron 中进行传播，然后调用 feedReplicationBacklog() 
+     * 把 CMD 记录在 server.repl_backlog 里面，并更新 master_repl_offset。
+     * 
+     * 然后 slave 每次跟 master 沟通的时候，就会向 master 回馈：
+     * 目前我这个 slave 读取到了你缓冲里面的 master_repl_offset 位置的命令，
+     * 你看看是不是最新的，不是的话，继续同步其他 CMD 给我。
+     * 啥？我进度落后太多了？已经没办法进行 PSYNC 了？好吧，我准备一下重新 FULL SYNC
+     * 
+     * 每次，这个位于 server 上面的 repl_backlog 环形缓冲区，是只有一个的，而且只会在 server 上面
+     * 而 master_repl_offset 的最新值也是在 server 上面的；
+     * 在 slave 的 redis-server 上面，都会有各自的同步进度，都是奔着 master_repl_offset 去的
+     * 
+     * 在进行 FULL SYNC 的时候，master 把这个当前的 master_repl_offset 发送给 slave，就像下面这样：
+     * "+FULLRESYNC 21a931865c82d28ec842c7c60bdc0ae6ceeaa12a 1\r\n\000"
+     */
+    // **缓冲区中的数据，最末尾那一位的版本号**
+    // 不停累计，作为一个修改的版本号。master 会在 masterTryPartialResynchronization() 的时候
+    // psync_offset = server.master_repl_offset; 当前的版本号同步给 slave
+    // 每次 slave 想要进行 PSYNC 的时候，master 看看 slave 的版本号，是否能够从 backlog 这个环形缓冲区中恢复
+    long long master_repl_offset;   /* Global replication offset */
+//==========================================================
+// NOTE: master_repl_offset\repl_backlog_off 这两个都是不断累加的，相当于一个版本号
+//       master_repl_offset 缓冲区中的数据，最末尾那一位的版本号
+//       repl_backlog_off   缓冲区中的数据，最开头那一位的版本号
+// NOTE: repl_backlog_idx\repl_backlog_size 才是作为数组的下标使用
+//==========================================================
+
     // backlog 的过期时间
     time_t repl_backlog_time_limit; /* Time without slaves after the backlog
                                        gets released. */
 
-    // 距离上一次有从服务器的时间
+
+    // 距离上一次有 slave 的时间
     time_t repl_no_slaves_since;    /* We have no slaves since that time.
                                        Only valid if server.slaves len is 0. */
 
-    // 是否开启最小数量从服务器写入功能
+    // 是否开启最小数量 slave 写入功能
     int repl_min_slaves_to_write;   /* Min number of slaves to write. */
-    // 定义最小数量从服务器的最大延迟值
+    // 定义最小数量 slave 的最大延迟值
     int repl_min_slaves_max_lag;    /* Max lag of <count> slaves to write. */
-    // 延迟良好的从服务器的数量
+    // 延迟良好的 slave 的数量
     int repl_good_slaves_count;     /* Number of slaves with lag <= max_lag. */
 
-
-    /* Replication (slave) */
-    // 主服务器的验证密码
+//=====================================================================
+    /* Replication (slave), 当本机是 slave 的时候，将会利用下面的结构体保存相连接的 master 信息 */
+    // 对应的 master 验证密码
     char *masterauth;               /* AUTH with this password with master */
-    // 主服务器的地址
+    // 对应的 master 地址
     char *masterhost;               /* Hostname of master */
-    // 主服务器的端口
+    // 对应的 master 端口
     int masterport;                 /* Port of master */
-    // 超时时间
+    // 超时时间，超时则视为 master <--> slave 之间的连接断开；默认 REDIS_REPL_TIMEOUT 60s
+    // 会在 replicationCron 进行周期性的检查
     int repl_timeout;               /* Timeout after N seconds of master idle */
-    // 主服务器所对应的客户端
+    // slave 将会使用这个 redisClient 跟 master 进行通信
     redisClient *master;     /* Client that is master for this slave */
-    // 被缓存的主服务器，PSYNC 时使用
+
+    /* SYNC 过程中的使用 */
+    // slave 才会使用：被缓存的 master ，PSYNC 时使用（为了处理 slave、master 短暂失联的情况）
+    // 将原本的 master 放到 cached_master 这里来，不能彻底销毁，因为 slave --> master 的 client，
+    // 保存至 repl 同步进度的信息
     redisClient *cached_master; /* Cached master to be reused for PSYNC. */
+
+
     int repl_syncio_timeout; /* Timeout for synchronous I/O calls */
-    // 复制的状态（服务器是从服务器时使用）
+    // 复制的状态（服务器是 slave 时使用）
     int repl_state;          /* Replication status if the instance is a slave */
     // RDB 文件的大小
     off_t repl_transfer_size; /* Size of RDB to read from master during sync. */
@@ -1384,7 +1450,7 @@ struct redisServer {
     // 最近一次执行 fsync 时的偏移量
     // 用于 sync_file_range 函数
     off_t repl_transfer_last_fsync_off; /* Offset when we fsync-ed last time. */
-    // 主服务器的套接字
+    //  在 slave 中，slave 连接向 master 的套接字
     int repl_transfer_s;     /* Slave -> Master SYNC socket */
     // 保存 RDB 文件的临时文件的描述符
     int repl_transfer_fd;    /* Slave -> Master SYNC temp file descriptor */
@@ -1392,18 +1458,39 @@ struct redisServer {
     char *repl_transfer_tmpfile; /* Slave-> master SYNC temp file name */
     // 最近一次读入 RDB 内容的时间
     time_t repl_transfer_lastio; /* Unix time of the latest read, for timeout */
+
+
     int repl_serve_stale_data; /* Serve stale data when link is down? */
-    // 是否只读从服务器？
+    // 是否只读 slave ？
     int repl_slave_ro;          /* Slave is read only? */
     // 连接断开的时长
     time_t repl_down_since; /* Unix time at which link with master went down */
     // 是否要在 SYNC 之后关闭 NODELAY ？
+    /*  Disable TCP_NODELAY on the slave socket after SYNC?
+    * 
+    *  If you select "yes" Redis will use a smaller number of TCP packets and
+    *  less bandwidth to send data to slaves. But this can add a delay for
+    *  the data to appear on the slave side, up to 40 milliseconds with
+    *  Linux kernels using a default configuration.
+    * 
+    *  If you select "no" the delay for data to appear on the slave side will
+    *  be reduced but more bandwidth will be used for replication.
+    * 
+    *  By default we optimize for low latency, but in very high traffic conditions
+    *  or when the master and slaves are many hops away, turning this to "yes" may
+    *  be a good idea.
+    * 
+    * 采用聚合等待的方式，能够更好的利用网络带宽进行 repl，但是 slave 的同步延迟会比较大
+    * 不采用聚合等待的方式，将会占用更多的网络资源，但是能够很好的降低 slave 的网络延迟问题（默认选择）
+    */
     int repl_disable_tcp_nodelay;   /* Disable TCP_NODELAY after SYNC? */
-    // 从服务器优先级
+
+    //  slave 优先级
     int slave_priority;             /* Reported in INFO and used by Sentinel. */
-    // 本服务器（从服务器）当前主服务器的 RUN ID
+    // 本服务器（ slave ）当前 master 的 RUN ID
     char repl_master_runid[REDIS_RUN_ID_SIZE+1];  /* Master run id for PSYNC. */
-    // 初始化偏移量
+    // 初始化偏移量，将会在第一次进行 FULL SYNC 的时候，由 master 告知 slave：master 现在的 server.master_repl_offset 是多少
+    // 因为 PSYNC 的关键是：master 不停地向 slave 推送数据，当断开连接时，自然是让 slave 告知 master：上次 slave 都到哪里了，我们继续
     long long repl_master_initial_offset;         /* Master PSYNC offset. */
 
 

@@ -1086,9 +1086,9 @@ int clientsCronHandleTimeout(redisClient *c) {
 
     // 服务器设置了 maxidletime 时间
     if (server.maxidletime &&
-        // 不检查作为从服务器的客户端
+        // 不检查作为 slave 的客户端
         !(c->flags & REDIS_SLAVE) &&    /* no timeout for slaves */
-        // 不检查作为主服务器的客户端
+        // 不检查作为 master 的客户端
         !(c->flags & REDIS_MASTER) &&   /* no timeout for masters */
         // 不检查被阻塞的客户端
         !(c->flags & REDIS_BLOCKED) &&  /* no timeout for BLPOP */
@@ -1225,7 +1225,7 @@ void databasesCron(void) {
 
     /* Expire keys by random sampling. Not required for slaves
      * as master will synthesize DELs for us. */
-    // 如果服务器不是从服务器，那么执行主动过期键清除
+    // 如果服务器不是 slave ，那么执行主动过期键清除
     if (server.active_expire_enabled && server.masterhost == NULL)
         // 清除模式为 CYCLE_SLOW ，这个模式会尽量多清除过期键
         activeExpireCycle(ACTIVE_EXPIRE_CYCLE_SLOW);
@@ -1442,6 +1442,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         int statloc;
         pid_t pid;
 
+        /* 回收子进程的状态，完成相应工作的下半场 */
         // 接收子进程发来的信号，非阻塞
         // meaning wait for any child process whose process group ID is equal to the absolute value of this main thread.
         // WNOHANG: return immediately if no child has exited.(非阻塞查询)
@@ -1555,7 +1556,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
     /* Replication cron function -- used to reconnect to master and
      * to detect transfer failures. */
     // 复制函数
-    // 重连接主服务器、向主服务器发送 ACK 、判断数据发送失败情况、断开本服务器超时的从服务器，等等
+    // 重连接 master 、向 master 发送 ACK 、判断数据发送失败情况、断开本服务器超时的 slave ，等等
     run_with_period(1000) replicationCron();
 
     /* Run the Redis Cluster cron. */
@@ -2700,7 +2701,7 @@ int processCommand(redisClient *c) {
 
     /* Don't accept write commands if there are problems persisting on disk
      * and if this is a master instance. */
-    // 如果这是一个主服务器，并且这个服务器之前执行 BGSAVE 时发生了错误
+    // 如果这是一个 master ，并且这个服务器之前执行 BGSAVE 时发生了错误
     // 那么不执行写命令
     if (((server.stop_writes_on_bgsave_err &&
           server.saveparamslen > 0 &&
@@ -3445,7 +3446,7 @@ void infoCommand(redisClient *c) {
 void monitorCommand(redisClient *c) {
     /* ignore MONITOR if already slave or in monitor mode */
 
-    // 这个客户端是从服务器，或者已经是监视器
+    // 这个客户端是 slave ，或者已经是监视器
     if (c->flags & REDIS_SLAVE) return;
 
     // 打开 SLAVE 标志和 MONITOR 标志
@@ -3609,7 +3610,7 @@ int freeMemoryIfNeeded(void) {
     /* Remove the size of slaves output buffers and AOF buffer from the
      * count of used memory. */
     // 计算出 Redis 目前占用的内存总数，但有两个方面的内存不会计算在内：
-    // 1）从服务器的输出缓冲区的内存
+    // 1） slave 的输出缓冲区的内存
     // 2）AOF 缓冲区的内存
     mem_used = zmalloc_used_memory();
     if (slaves) {
@@ -4000,7 +4001,7 @@ int main(int argc, char **argv) {
      * in sentinel mode will have the effect of populating the sentinel
      * data structures with master nodes to monitor. */
     // 如果服务器以 Sentinel 模式启动，那么进行 Sentinel 功能相关的初始化
-    // 并为要监视的主服务器创建一些相应的数据结构
+    // 并为要监视的 master 创建一些相应的数据结构
     if (server.sentinel_mode) {
         initSentinelConfig();
         initSentinel();
