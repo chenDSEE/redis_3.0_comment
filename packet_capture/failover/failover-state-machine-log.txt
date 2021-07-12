@@ -1,0 +1,154 @@
+======================================= sentinel 1(172.18.96.81, master) =======================================================
+>>> info:
+runid: 2a7b1ef04aba12655975d35e7d59c1ace5629bd4
+
+>>> failover:
+[499503] 08 Jul 11:06:57.424 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:57.424 # +sdown master mymaster 172.18.96.81 6379
+[499503] 08 Jul 11:06:57.488 # +new-epoch 2
+[499503] 08 Jul 11:06:57.490 # +vote-for-leader 40aae86989877086257766cf6425e1fca2444133 2
+[499503] 08 Jul 11:06:57.500 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:57.500 # +odown master mymaster 172.18.96.81 6379 #quorum 3/2
+[499503] 08 Jul 11:06:57.500 # Next failover delay: I will not start a failover before Thu Jul  8 11:12:58 2021
+[499503] 08 Jul 11:06:57.571 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:57.643 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:57.695 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:57.796 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:57.867 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:57.951 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:58.041 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:58.125 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:58.226 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:58.288 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:58.371 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:58.462 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:58.538 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:58.628 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:58.711 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:58.794 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:58.849 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:58.933 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:59.024 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:59.084 # +config-update-from sentinel 172.18.96.86:26379 172.18.96.86 26379 @ mymaster 172.18.96.81 6379
+[499503] 08 Jul 11:06:59.085 # +switch-master mymaster 172.18.96.81 6379 172.18.96.86 6379
+[499503] 08 Jul 11:06:59.085 * +slave slave 172.18.96.87:6379 172.18.96.87 6379 @ mymaster 172.18.96.86 6379
+[499503] 08 Jul 11:06:59.087 * +slave slave 172.18.96.81:6379 172.18.96.81 6379 @ mymaster 172.18.96.86 6379
+[499503] 08 Jul 11:06:59.092 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:59.194 # one run for redis sentinel timer
+[499503] 08 Jul 11:06:59.294 # one run for redis sentinel timer
+===========================================================================================================
+
+
+======================================= sentinel 2(172.18.96.86, new master) =======================================================
+>>> info:
+runid: 177088dffa23d3aaf6f1c0cac1eb655df9b960ea
+
+>>> failover:
+[1922] 08 Jul 11:06:57.395 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:57.395 # +sdown master mymaster 172.18.96.81 6379
+[1922] 08 Jul 11:06:57.461 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:57.487 # +new-epoch 2
+[1922] 08 Jul 11:06:57.488 # +vote-for-leader 40aae86989877086257766cf6425e1fca2444133 2
+[1922] 08 Jul 11:06:57.532 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:57.629 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:57.685 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:57.756 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:57.855 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:57.923 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:58.013 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:58.076 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:58.138 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:58.231 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:58.314 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:58.405 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:58.503 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:58.586 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:58.586 # +odown master mymaster 172.18.96.81 6379 #quorum 3/2
+[1922] 08 Jul 11:06:58.586 # Next failover delay: I will not start a failover before Thu Jul  8 11:12:57 2021
+[1922] 08 Jul 11:06:58.653 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:58.711 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:58.782 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:58.854 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:58.926 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:58.939 # +config-update-from sentinel 172.18.96.87:26379 172.18.96.87 26379 @ mymaster 172.18.96.81 6379
+[1922] 08 Jul 11:06:58.939 # +switch-master mymaster 172.18.96.81 6379 172.18.96.86 6379
+[1922] 08 Jul 11:06:58.939 * +slave slave 172.18.96.87:6379 172.18.96.87 6379 @ mymaster 172.18.96.86 6379
+[1922] 08 Jul 11:06:58.970 * +slave slave 172.18.96.81:6379 172.18.96.81 6379 @ mymaster 172.18.96.86 6379
+[1922] 08 Jul 11:06:59.026 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:59.084 # one run for redis sentinel timer
+[1922] 08 Jul 11:06:59.182 # one run for redis sentinel timer
+===========================================================================================================
+
+
+
+======================================= sentinel 3(172.18.96.87, slave, leader sentinel) =======================================================
+>>> info:
+runid: 40aae86989877086257766cf6425e1fca2444133
+
+>>> failover:
+[1904] 08 Jul 11:06:57.252 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:57.323 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:57.399 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:57.399 # +sdown master mymaster 172.18.96.81 6379
+[1904] 08 Jul 11:06:57.464 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:57.464 # +odown master mymaster 172.18.96.81 6379 #quorum 2/2
+[1904] 08 Jul 11:06:57.464 # +new-epoch 2
+[1904] 08 Jul 11:06:57.464 # +try-failover master mymaster 172.18.96.81 6379
+[1904] 08 Jul 11:06:57.486 # +vote-for-leader 40aae86989877086257766cf6425e1fca2444133 2
+[1904] 08 Jul 11:06:57.497 # 172.18.96.86:26379 voted for 40aae86989877086257766cf6425e1fca2444133 2
+[1904] 08 Jul 11:06:57.497 # 172.18.96.81:26379 voted for 40aae86989877086257766cf6425e1fca2444133 2
+[1904] 08 Jul 11:06:57.552 # one run for redis sentinel timer   // SENTINEL_FAILOVER_STATE_WAIT_START 切换为 SENTINEL_FAILOVER_STATE_SELECT_SLAVE 之后, 是需要等待一次 cron, 然后才会处理下一个状态的
+[1904] 08 Jul 11:06:57.552 # +elected-leader master mymaster 172.18.96.81 6379
+[1904] 08 Jul 11:06:57.552 # +failover-state-select-slave master mymaster 172.18.96.81 6379
+[1904] 08 Jul 11:06:57.629 # one run for redis sentinel timer   // 每一个状态行动都要等一个 cron, 显然就是一个异步的框架
+[1904] 08 Jul 11:06:57.629 # +selected-slave slave 172.18.96.86:6379 172.18.96.86 6379 @ mymaster 172.18.96.81 6379
+[1904] 08 Jul 11:06:57.629 * +failover-state-send-slaveof-noone slave 172.18.96.86:6379 172.18.96.86 6379 @ mymaster 172.18.96.81 6379
+[1904] 08 Jul 11:06:57.730 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:57.730 * +failover-state-wait-promotion slave 172.18.96.86:6379 172.18.96.86 6379 @ mymaster 172.18.96.81 6379
+[1904] 08 Jul 11:06:57.836 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:57.919 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:57.977 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:58.029 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:58.085 # one run for redis sentinel timer
+
+// .... 等待挑出来的 slave 完成 SLAVEOF NO ONE, 完成 promote
+
+[1904] 08 Jul 11:06:58.176 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:58.266 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:58.367 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:58.477 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:58.529 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:58.542 # +promoted-slave slave 172.18.96.86:6379 172.18.96.86 6379 @ mymaster 172.18.96.81 6379
+[1904] 08 Jul 11:06:58.542 # +failover-state-reconf-slaves master mymaster 172.18.96.81 6379
+[1904] 08 Jul 11:06:58.581 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:58.581 * +slave-reconf-sent slave 172.18.96.87:6379 172.18.96.87 6379 @ mymaster 172.18.96.81 6379
+[1904] 08 Jul 11:06:58.659 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:58.759 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:58.835 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:58.939 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:59.018 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:59.117 # one run for redis sentinel timer
+
+// 等待相应的 slave 跟 new master 完成同步
+
+[1904] 08 Jul 11:06:59.194 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:59.288 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:59.358 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:59.413 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:59.513 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:59.586 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:59.586 * +slave-reconf-inprog slave 172.18.96.87:6379 172.18.96.87 6379 @ mymaster 172.18.96.81 6379
+[1904] 08 Jul 11:06:59.586 * +slave-reconf-done slave 172.18.96.87:6379 172.18.96.87 6379 @ mymaster 172.18.96.81 6379
+[1904] 08 Jul 11:06:59.641 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:59.641 # -odown master mymaster 172.18.96.81 6379
+[1904] 08 Jul 11:06:59.641 # +failover-end master mymaster 172.18.96.81 6379
+[1904] 08 Jul 11:06:59.641 # +switch-master mymaster 172.18.96.81 6379 172.18.96.86 6379
+[1904] 08 Jul 11:06:59.641 * +slave slave 172.18.96.87:6379 172.18.96.87 6379 @ mymaster 172.18.96.86 6379
+[1904] 08 Jul 11:06:59.664 * +slave slave 172.18.96.81:6379 172.18.96.81 6379 @ mymaster 172.18.96.86 6379
+[1904] 08 Jul 11:06:59.774 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:59.827 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:59.888 # one run for redis sentinel timer
+[1904] 08 Jul 11:06:59.990 # one run for redis sentinel timer
+[1904] 08 Jul 11:07:00.054 # one run for redis sentinel timer
+[1904] 08 Jul 11:07:00.125 # one run for redis sentinel timer
+===========================================================================================================

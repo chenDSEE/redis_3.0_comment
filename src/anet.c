@@ -229,6 +229,8 @@ int anetGenericResolve(char *err, char *host, char *ipbuf, size_t ipbuf_len,
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;  /* specify socktype to avoid dups */
 
+    // 可能会卡 DNS，导致启动时间较长，这是一个同步阻塞的查询
+    // 但是通过 hostname ---DNS---> ip 的方式，可以动态决定这个 host 所对应的 IP（更为灵活）
     if ((rv = getaddrinfo(host, NULL, &hints, &info)) != 0) {
         anetSetError(err, "%s", gai_strerror(rv));
         return ANET_ERR;

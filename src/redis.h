@@ -1463,7 +1463,7 @@ struct redisServer {
     int repl_serve_stale_data; /* Serve stale data when link is down? */
     // 是否只读 slave ？
     int repl_slave_ro;          /* Slave is read only? */
-    // 连接断开的时长
+    // 记录了 slave 连接断开的时间点
     time_t repl_down_since; /* Unix time at which link with master went down */
     // 是否要在 SYNC 之后关闭 NODELAY ？
     /*  Disable TCP_NODELAY on the slave socket after SYNC?

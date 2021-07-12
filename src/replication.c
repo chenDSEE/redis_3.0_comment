@@ -505,7 +505,9 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
     }
 }
 
-// 将协议发给 Monitor
+// 将 RESP 协议的所有内容都原封不动的发给 Monitor 的那个 redis-client
+// 因为你是正在监控，所以无论这个 CMD 是否成功、甚至内容对错，也不管，直接转发一次就好
+// 通过 redis-server 记住有谁正在 monitor 自己，自己自觉、主动汇报来实现 Monitor 功能
 // TODO: 看了 Monitor 功能后再来看
 void replicationFeedMonitors(redisClient *c, list *monitors, int dictid, robj **argv, int argc) {
     listNode *ln;

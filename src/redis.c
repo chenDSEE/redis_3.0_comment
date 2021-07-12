@@ -4002,9 +4002,10 @@ int main(int argc, char **argv) {
      * data structures with master nodes to monitor. */
     // 如果服务器以 Sentinel 模式启动，那么进行 Sentinel 功能相关的初始化
     // 并为要监视的 master 创建一些相应的数据结构
+    // 要在常规初始化 initServerConfig() 后面，这样才能为 sentinel 模式的 redis-server 禁用常规 CMD
     if (server.sentinel_mode) {
         initSentinelConfig();
-        initSentinel();
+        initSentinel(); // 将会清除常规的配置
     }
 
     // 检查用户是否指定了配置文件，或者配置选项
