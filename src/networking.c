@@ -2394,6 +2394,7 @@ void pauseClients(mstime_t end) {
  * function checks if the pause time was reached and clear it. */
  // 判断服务器目前被暂停客户端的数量，没有任何客户端被暂停时，返回 0 。
 // TODO: 看完切片部署，再回来看这个函数，看看 clients_paused 跟 unblocked_clients 的关系
+// clients_paused 是暂时无法提供服务，所以采用暂停
 int clientsArePaused(void) {
     if (server.clients_paused && server.clients_pause_end_time < server.mstime) {
         listNode *ln;

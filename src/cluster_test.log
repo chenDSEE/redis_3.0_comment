@@ -1,0 +1,75 @@
+cd /root/redis_3.0/
+make clean && make install
+cd -
+
+unalias cp
+cp  /root/redis_3.0/my-version/redis-server  /root/redis_3.0/cluster-test/0/ -f
+cp  /root/redis_3.0/my-version/redis-server  /root/redis_3.0/cluster-test/1/ -f
+cp  /root/redis_3.0/my-version/redis-server  /root/redis_3.0/cluster-test/2/ -f
+cp  /root/redis_3.0/my-version/redis-server  /root/redis_3.0/cluster-test/3/ -f
+cp  /root/redis_3.0/my-version/redis-server  /root/redis_3.0/cluster-test/4/ -f
+cp  /root/redis_3.0/my-version/redis-server  /root/redis_3.0/cluster-test/5/ -f
+cp  /root/redis_3.0/my-version/redis-server  /root/redis_3.0/cluster-test/6/ -f
+alias cp='cp -i'
+
+
+
+cd /root/redis_3.0/cluster-test/0/
+rm -f appendonly.aof nodes.conf 
+./redis-server ./redis.conf 
+
+
+cd /root/redis_3.0/cluster-test/1/
+rm -f appendonly.aof nodes.conf 
+./redis-server ./redis.conf 
+
+
+cd /root/redis_3.0/cluster-test/2/
+rm -f appendonly.aof nodes.conf 
+./redis-server ./redis.conf 
+
+
+cd /root/redis_3.0/cluster-test/3/
+rm -f appendonly.aof nodes.conf 
+./redis-server ./redis.conf 
+
+
+cd /root/redis_3.0/cluster-test/4/
+rm -f appendonly.aof nodes.conf 
+./redis-server ./redis.conf 
+
+cd /root/redis_3.0/cluster-test/5/
+rm -f appendonly.aof nodes.conf 
+./redis-server ./redis.conf 
+
+
+cd /root/redis_3.0/cluster-test/6/
+rm -f appendonly.aof nodes.conf 
+./redis-server ./redis.conf 
+
+
+
+redis-cli -h 127.0.0.1 -p 7000
+cluster meet 127.0.0.1 7001
+cluster meet 127.0.0.1 7002
+cluster meet 127.0.0.1 7003
+cluster meet 127.0.0.1 7004
+cluster meet 127.0.0.1 7005
+cluster meet 127.0.0.1 7006
+
+
+CLUSTER REPLICATE 8e484dbdb1e831462310303a814c1a874b4978f4
+CLUSTER REPLICATE b2b8c8126c68f945ccbd21d6bb9b0daf089e7189
+CLUSTER REPLICATE 1c105002f09c2239b99ceae97fbab64e23c9a90a
+
+redis-cli -h 127.0.0.1 -p 7000 cluster addslots {0..5000}
+redis-cli -h 127.0.0.1 -p 7001 cluster addslots {5001..10000}
+redis-cli -h 127.0.0.1 -p 7002 cluster addslots {10001..16383}
+
+redis-cli -h 127.0.0.1 -p 7000 cluster addslots {0..5000}
+redis-cli -h 127.0.0.1 -p 7001 cluster addslots {5001..16383}
+
+
+redis-cli -c -h 127.0.0.1 -p 7000
+
+

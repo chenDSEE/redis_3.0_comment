@@ -1999,6 +1999,7 @@ void adjustOpenFilesLimit(void) {
  * impossible to bind, or no bind addresses were specified in the server
  * configuration but the function is not able to bind * for at least
  * one of the IPv4 or IPv6 protocols. */
+// 不写 bind 配置的话，将会 bind *，而且是 ipv4 + ipv6 的
 int listenToPort(int port, int *fds, int *count) {
     int j;
 
@@ -2572,6 +2573,7 @@ void call(redisClient *c, int flags) {
  * 
  *        7. if (成功解析完整的 argv[argc]) {
  *               8. 调用 processCommand(), 也就是下面这个函数，根据 CMD 的类型进一步分发处理
+ *                 （在 cluster 的情况下，甚至需要 redirect 到其他 node 上面）
  *               9. resetClient(), 为下一个 CMD 做准备
  *           }
  *    }
@@ -2626,24 +2628,24 @@ int processCommand(redisClient *c) {
      * 不过，如果有以下情况出现，那么节点不进行转向：
      *
      * 1) The sender of this command is our master.
-     *    命令的发送者是本节点的主节点
+     *    命令的发送者是本节点的主节点（相当于 master 在向 slave 同步）
      *
      * 2) The command has no key arguments. 
      *    命令没有 key 参数
      */
-    if (server.cluster_enabled &&
-        !(c->flags & REDIS_MASTER) &&
-        !(c->cmd->getkeys_proc == NULL && c->cmd->firstkey == 0))
+    if (server.cluster_enabled &&       // 启动了 cluster 模式
+        !(c->flags & REDIS_MASTER) &&   // client 不能是 master（是 master 的话，直接执行，不用进行 redirct 的判断，相信 master 过来的 CMD）
+        !(c->cmd->getkeys_proc == NULL && c->cmd->firstkey == 0))   // 只有包含 key 的 redis CMD 才需要进行 redirect 操作，其他操作都不需要，所以不进入这个 if-branch
     {
         int hashslot;
 
-        // 集群已下线
+        // 集群已下线，不对外提供服务
         if (server.cluster->state != REDIS_CLUSTER_OK) {
             flagTransaction(c);
             addReplySds(c,sdsnew("-CLUSTERDOWN The cluster is down. Use CLUSTER INFO for more information\r\n"));
             return REDIS_OK;
 
-        // 集群运作正常
+        // 集群运作正常，可以对外提供服务
         } else {
             int error_code;
             clusterNode *n = getNodeByQuery(c,c->cmd,c->argv,c->argc,&hashslot,&error_code);

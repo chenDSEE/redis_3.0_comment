@@ -36,7 +36,7 @@
 #define REDIS_CLUSTER_FAILOVER_DELAY 5 /* Seconds */
 // 未使用，似乎已经废弃
 #define REDIS_CLUSTER_DEFAULT_MIGRATION_BARRIER 1
-// 在进行手动的故障转移之前，需要等待的超时时间
+// 在 manual failover 执行的超时时间
 #define REDIS_CLUSTER_MF_TIMEOUT 5000 /* Milliseconds to do a manual failover. */
 // 未使用，似乎已经废弃
 #define REDIS_CLUSTER_MF_PAUSE_MULT 2 /* Master pause manual failover mult. */
@@ -55,6 +55,7 @@
 #define REDIS_CLUSTER_REDIR_MOVED 4         /* -MOVED redirection required. */
 
 // 前置定义，防止编译错误
+// 出于编码方便的原因，clusterLink、clusterNode 是相互记住对方指针地址的
 struct clusterNode;
 
 
@@ -72,9 +73,18 @@ typedef struct clusterLink {
     sds sndbuf;                 /* Packet send buffer */
 
     // 输入缓冲区，保存着从其他节点接收到的消息。
+    // 里面永远只会 <= 1 个消息，其他已经到达的数据，会留在 linux 内核里面，不会被 redis 读出来，buf 起来的
     sds rcvbuf;                 /* Packet reception buffer */
 
     // 与这个连接相关联的节点，如果没有的话就为 NULL
+    // 通常是主动发起的连接，link->node 不为 NULL; 
+    // 通常是 node A（当前 redis-server） 用这个 link 来观察 node B; link->node == node B
+    // 被动 accept 的连接，link->node == NULL; 仅仅是让别人观察自己
+    // 这样一来，两个 node 之间，是会有两条 TCP socket 的 
+    // TODO:(DONE) 为什么要这么做呢？建立两条 socket 的意义何在？
+    // 要是双方都用同一个 socket 观测对方，要是 socket 断了，那究竟是自己除了问题呢？还是对方除了问题呢？分不清的
+    // 只有在 clusterCron 的时候（主动连接），才会把 node 填上，node 就是被观察的那个 node 的信息
+    // clusterCron() ----> link = createClusterLink(node);
     struct clusterNode *node;   /* Node related to this link if any, or NULL */
 
 } clusterLink;
@@ -84,18 +94,20 @@ typedef struct clusterLink {
 #define REDIS_NODE_MASTER 1     /* The node is a master */
 // 该节点为从节点
 #define REDIS_NODE_SLAVE 2      /* The node is a slave */
-// 该节点疑似下线，需要对它的状态进行确认
-#define REDIS_NODE_PFAIL 4      /* Failure? Need acknowledge */
+// 该节点疑似下线，需要对它的状态进行确认(也就是 node timeout, 超时不回 PONG)
+#define REDIS_NODE_PFAIL 4      /* Failure? Need acknowledge(Probable FAIL) */
 // 该节点已下线
 #define REDIS_NODE_FAIL 8       /* The node is believed to be malfunctioning */
 // 该节点是当前节点自身
 #define REDIS_NODE_MYSELF 16    /* This node is myself */
 // 该节点还未与当前节点完成第一次 PING - PONG 通讯
+// (当 node A 开始 connect 之后，就会打上这个 flag；直到 node A 收到了 MEET-PONG)
 #define REDIS_NODE_HANDSHAKE 32 /* We have still to exchange the first ping */
 // 该节点没有地址
 #define REDIS_NODE_NOADDR   64  /* We don't know the address of this node */
 // 当前节点还未与该节点进行过接触
 // 带有这个标识会让当前节点发送 MEET 命令而不是 PING 命令
+// 还没有发送 MEET 的时候，就会被打上这个 flag，发完之后，就会去掉了
 #define REDIS_NODE_MEET 128     /* Send a MEET message to this node */
 // 该节点被选中为新的主节点
 #define REDIS_NODE_PROMOTED 256 /* Master was a slave propoted by failover */
@@ -112,11 +124,13 @@ typedef struct clusterLink {
 #define nodeFailed(n) ((n)->flags & REDIS_NODE_FAIL)
 
 /* This structure represent elements of node->fail_reports. */
+// 首先，这个 node 是当前 redis-server 对于其他 node 的看法；
+// node_A->fail_reports 记录了所有认为 node_A 是 fail 的信息（谁觉得 node_A 是 fail 的，什么时候跟我这个  redis-server 汇报的？）
 // 每个 clusterNodeFailReport 结构保存了一条其他节点对目标节点的下线报告
 // （认为目标节点已经下线）
 struct clusterNodeFailReport {
 
-    // 报告目标节点已经下线的节点
+    // 是哪个 node 觉得我是 fail 的
     struct clusterNode *node;  /* Node reporting the failure condition. */
 
     // 最后一次从 node 节点收到下线报告的时间
@@ -126,7 +140,7 @@ struct clusterNodeFailReport {
 } typedef clusterNodeFailReport;
 
 
-// 节点状态
+// node 状态
 struct clusterNode {
 
     // 创建节点的时间
@@ -150,7 +164,7 @@ struct clusterNode {
     // 位的值为 1 表示槽正由本节点处理，值为 0 则表示槽并非本节点处理
     // 比如 slots[0] 的第一个位保存了槽 0 的保存情况
     // slots[0] 的第二个位保存了槽 1 的保存情况，以此类推
-    unsigned char slots[REDIS_CLUSTER_SLOTS/8]; /* slots handled by this node */
+    unsigned char slots[REDIS_CLUSTER_SLOTS/8]; /* slots handled by this node(save as bitmap) */
 
     // 该节点负责处理的槽数量
     int numslots;   /* Number of slots handled by this node */
@@ -158,13 +172,16 @@ struct clusterNode {
     // 如果本节点是主节点，那么用这个属性记录从节点的数量
     int numslaves;  /* Number of slave nodes, if this is a master */
 
-    // 指针数组，指向各个从节点
+    // 指针数组，指向各个从节点（新加一个 slave，就 realloc 一次。一个 node 的 slave 不会很多的）
     struct clusterNode **slaves; /* pointers to slave nodes */
 
     // 如果这是一个从节点，那么指向主节点
     struct clusterNode *slaveof; /* pointer to the master node */
 
     // 最后一次发送 PING 命令的时间
+    // 用于推算 node timeout、node 失联的大致时间点
+    // re-connect 之后的第一个 ping 不应该更新这个值，原因参考 clusterCron() 函数
+    // 归零就意味着：当前所有 ping-pong 都是成对的，没有未收到相应的 ping
     mstime_t ping_sent;      /* Unix time we sent latest ping */
 
     // 最后一次接收 PONG 回复的时间戳
@@ -191,10 +208,12 @@ struct clusterNode {
     // 保存连接节点所需的有关信息
     clusterLink *link;          /* TCP/IP link with this node */
 
-    // 一个链表，记录了所有其他节点对该节点的下线报告
+    // 一个链表，记录了所有其他节点对该节点的下线报告(由 clusterNodeFailReport 组成的链表)
+    // 晚点 markNodeAsFailingIfNeeded() 需要用这个 fail_reports 来统计 fail 的投票情况
     list *fail_reports;         /* List of nodes signaling this as failing */
 
 };
+// 对于一个 redis-server 来说，其他的 radius-server 都是用 clusterNode 这个结构体来进行记忆
 typedef struct clusterNode clusterNode;
 
 
@@ -207,24 +226,27 @@ typedef struct clusterState {
     // 指向当前节点的指针
     clusterNode *myself;  /* This node */
 
-    // 集群当前的配置纪元，用于实现故障转移
+    // 集群当前的配置纪元，用于实现故障转移（基本是出现故障才会用这个变更 cluster 中 node 的配置）
     uint64_t currentEpoch;
 
-    // 集群当前的状态：是在线还是下线
+    // 每个 node 觉得这个集群当前的状态：是在线还是下线
     int state;            /* REDIS_CLUSTER_OK, REDIS_CLUSTER_FAIL, ... */
 
-    // 集群中至少处理着一个槽的节点的数量。
+    // 在线并且拥有 slot 的 master node 的数量
     int size;             /* Num of master nodes with at least one slot */
 
     // 集群节点名单（包括 myself 节点）
-    // 字典的键为节点的名字，字典的值为 clusterNode 结构
+    // 字典的键为节点的名字，字典的值为 clusterNode 结构（对应集群里面的其他 redis-server）
     dict *nodes;          /* Hash table of name -> clusterNode structures */
 
     // 节点黑名单，用于 CLUSTER FORGET 命令
     // 防止被 FORGET 的命令重新被添加到集群里面
     // （不过现在似乎没有在使用的样子，已废弃？还是尚未实现？）
+    // 避免加入其他集群的 node，导致本 node 处于两个不同的集群中
     dict *nodes_black_list; /* Nodes we don't re-add for a few seconds. */
 
+    // importing_slots_from, importing_slots_from 相当于在 target、source 两个 node 上面设置好标记
+    // 让很多 cluster 的操作都尽量不要动被标记的 slot，因为迁移过程中的 slot 处于中间态，是不适合乱动的
     // 记录要从当前节点迁移到目标节点的槽，以及迁移的目标节点
     // migrating_slots_to[i] = NULL 表示槽 i 未被迁移
     // migrating_slots_to[i] = clusterNode_A 表示槽 i 要从本节点迁移至节点 A
@@ -237,17 +259,23 @@ typedef struct clusterState {
 
     // 负责处理各个槽的节点
     // 例如 slots[i] = clusterNode_A 表示槽 i 由节点 A 处理
+    // 内存确实是比较大的，即使是指针
     clusterNode *slots[REDIS_CLUSTER_SLOTS];
 
     // 跳跃表，表中以槽作为分值，键作为成员，对槽进行有序排序
     // 当需要对某些槽进行区间（range）操作时，这个跳跃表可以提供方便
     // 具体操作定义在 db.c 里面
+    // 因为每个 node 的 slot 可能是不连续的，用跳表会具有更强的适应性
+    // TODO:(DONE) 但是同一个 slot 可能有很多 key 呀？那么这些 key 的 score 一样就好了呀，跳表是可以接受相同 score 的
+    // 之所以要引入 slot 的概念，也是为了更好的 reshard，调整 cluster 中的 node 负载罢了
     zskiplist *slots_to_keys;
 
     /* The following fields are used to take the slave state on elections. */
     // 以下这些域被用于进行故障转移选举
 
-    // 上次执行选举或者下次执行选举的时间
+    // auth --> authorization
+    // 上次执行选举或者下次执行选举的时间（因为要留出一些时间，让整个 cluster 知晓并达成一致：master 已经 DOWN 了）
+    // 所以选举正式开始的时间是需要一些延迟的
     mstime_t failover_auth_time; /* Time of previous or next election. */
 
     // 节点获得的投票数量
@@ -261,16 +289,18 @@ typedef struct clusterState {
     uint64_t failover_auth_epoch; /* Epoch of the current election. */
 
     /* Manual failover state in common. */
-    /* 共用的手动故障转移状态 */
+    /* 共用的手动故障转移状态（mf 的前缀就已经很能说明：这是 manual failover 用的变量了，而不是自动 failover 的变量） */
 
     // 手动故障转移执行的时间限制
+    // 基本可以算是 failover 是否开始、正在进行的一个标志
+    // 无论是 slave 还是 master, 一旦知晓自己要开始 failover 的流程，就会设置这个超时时间
     mstime_t mf_end;            /* Manual failover time limit (ms unixtime).
                                    It is zero if there is no MF in progress. */
     /* Manual failover state of master. */
     /*  master 的手动故障转移状态 */
-    clusterNode *mf_slave;      /* Slave performing the manual failover. */
+    clusterNode *mf_slave;      /* Slave performing the manual failover. 是哪个 slave 要求进行 manual failover */
     /* Manual failover state of slave. */
-    /*  slave 的手动故障转移状态 */
+    /*  slave 的手动故障转移状态（slave 使用这个变量） */
     long long mf_master_offset; /* Master offset the slave needs to start MF
                                    or zero if stil not received. */
     // 指示手动故障转移是否可以开始的标志值
@@ -285,6 +315,10 @@ typedef struct clusterState {
     uint64_t lastVoteEpoch;     /* Epoch of the last vote granted. */
 
     // 在进入下个事件循环之前要做的事情，以各个 flag 来记录
+    // #define CLUSTER_TODO_HANDLE_FAILOVER (1<<0)
+    // #define CLUSTER_TODO_UPDATE_STATE (1<<1)
+    // #define CLUSTER_TODO_SAVE_CONFIG (1<<2)
+    // #define CLUSTER_TODO_FSYNC_CONFIG (1<<3)
     int todo_before_sleep; /* Things to do in clusterBeforeSleep(). */
 
     // 通过 cluster 连接发送的消息数量
@@ -425,6 +459,7 @@ union clusterMsgData {
 };
 
 // 用来表示集群消息的结构（消息头，header）
+// 总是填充自己 myself node 的信息
 typedef struct {
     char sig[4];        /* Siganture "RCmb" (Redis Cluster message bus). */
     // 消息的长度（包括这个消息头的长度和消息正文的长度）
@@ -436,10 +471,11 @@ typedef struct {
     uint16_t type;      /* Message type */
 
     // 消息正文包含的节点信息数量
-    // 只在发送 MEET 、 PING 和 PONG 这三种 Gossip 协议消息时使用
+    // 只在发送 MEET、PING 和 PONG 这三种 Gossip 协议消息时使用
     uint16_t count;     /* Only used for some kind of messages. */
 
     // 消息发送者的配置纪元
+    // it is used in order to give incremental versioning to events
     uint64_t currentEpoch;  /* The epoch accordingly to the sending node. */
 
     // 如果消息发送者是一个主节点，那么这里记录的是消息发送者的配置纪元
@@ -455,7 +491,7 @@ typedef struct {
     // 消息发送者的名字（ID）
     char sender[REDIS_CLUSTER_NAMELEN]; /* Name of the sender node */
 
-    // 消息发送者目前的槽指派信息
+    // 消息发送者目前的槽指派信息(bitmap)
     unsigned char myslots[REDIS_CLUSTER_SLOTS/8];
 
     // 如果消息发送者是一个从节点，那么这里记录的是消息发送者正在复制的主节点的名字

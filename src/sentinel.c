@@ -27,6 +27,9 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
+
+// NOTE: 为了解决脑裂问题，民主式决策的系统一般都采用“投票节点数必须超过系统总节点数一半”规则来处理。
+// NOTE: 多个独立的个体通过投票的方式来进行状态决策。其基础都是独立的个体之间交换信息，每个个体做出自己的决策，然后按照“多数取胜”的规则来确定最终的状态。
 /* 主动轮询的异步执行结构
  *
  * 整个 sentinel 的核心是异步处理, 周期性处理任务

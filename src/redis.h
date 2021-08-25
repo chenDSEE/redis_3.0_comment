@@ -1072,7 +1072,8 @@ struct redisServer {
     // UNIX 套接字文件描述符
     int sofd;                   /* Unix socket file descriptor */
 
-    int cfd[REDIS_BINDADDR_MAX];/* Cluster bus listening socket */
+    // 通常 cfd_count = 2, one for ipv4, another for ipv6
+    int cfd[REDIS_BINDADDR_MAX];/* Cluster bus **listening** socket */
     int cfd_count;              /* Used slots in cfd[] */
 
     // 一个链表，保存了所有客户端状态结构
@@ -1092,7 +1093,7 @@ struct redisServer {
     // 网络错误
     char neterr[ANET_ERR_LEN];   /* Error buffer for anet.c */
 
-    // MIGRATE 缓存
+    // MIGRATE 缓存(毕竟真实场景中，同一个 slot 是会有很多 key-value pair 的)
     dict *migrate_cached_sockets;/* MIGRATE cached sockets */
 
 //===========================================================
@@ -1554,12 +1555,13 @@ struct redisServer {
 
 
     /* Cluster */
-
+    // 不仅仅是影响相关的 CLI 执行权限，还会触发不同的 server-cron
     int cluster_enabled;      /* Is cluster enabled? */
     mstime_t cluster_node_timeout; /* Cluster node timeout. */
     char *cluster_configfile; /* Cluster auto-generated config file name. */
-    struct clusterState *cluster;  /* State of the cluster */
+    struct clusterState *cluster;  /* State of the cluster, 这是本 node 对于整个 cluster 的看法，记录了本 node 对于 cluster 的判断 */
 
+    // 在 replicas migration 之前，会确保每一个 master 都至少有 server.cluster_migration_barrier 个 slave，才能进行 slave(replicas) migration
     int cluster_migration_barrier; /* Cluster replicas migration barrier. */
     /* Scripting */
 
@@ -1647,6 +1649,7 @@ struct redisCommand {
     /* Use a function to determine keys arguments in a command line.
      * Used for Redis Cluster redirect. */
     // 从命令中判断命令的键参数。在 Redis 集群转向时使用。
+    // TODO: 怎么用的？cluser.c: getNodeByQuery() ---> getKeysFromCommand()
     redisGetKeysProc *getkeys_proc;
 
     /* What keys should be loaded in background when calling this command? */
